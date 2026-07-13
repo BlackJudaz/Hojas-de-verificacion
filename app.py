@@ -1,6 +1,9 @@
 #app.py
 
+from pathlib import Path
 import streamlit as st
+
+BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Hojas de Verificación", layout="wide")
 
@@ -23,7 +26,7 @@ pagina_3 = st.Page(str(BASE_DIR / "pages" / "3_Informacion del usuario.py"), tit
 pg = st.navigation([pagina_1, pagina_2, pagina_3], position="hidden")
 
 with st.sidebar:
-    st.image("image_5976e1.png", use_container_width=True)
+    st.image(str(BASE_DIR / "image_5976e1.png"), use_container_width=True)
     st.divider()
     st.markdown("### Menú")
     st.page_link(pagina_1, label="Hojas de Verificación")
