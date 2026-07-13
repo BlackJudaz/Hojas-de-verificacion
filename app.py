@@ -1,6 +1,9 @@
 #app.py
 
+from pathlib import Path
 import streamlit as st
+
+BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Hojas de Verificación", layout="wide")
 
@@ -16,14 +19,14 @@ if "nombre_jefe" not in st.session_state:
 if "nombre_hospital" not in st.session_state:
     st.session_state.nombre_hospital = ""
 
-pagina_1 = st.Page("pages/1_Hojas de Verificacion.py", title="Hojas de Verificación")
-pagina_2 = st.Page("pages/2_Inventario.py", title="Cargar Inventario")
-pagina_3 = st.Page("pages/3_Informacion del usuario.py", title="Información del Usuario")
+pagina_1 = st.Page(str(BASE_DIR / "pages" / "1_Hojas de Verificacion.py"), title="Hojas de Verificación")
+pagina_2 = st.Page(str(BASE_DIR / "pages" / "2_Inventario.py"), title="Cargar Inventario")
+pagina_3 = st.Page(str(BASE_DIR / "pages" / "3_Informacion del usuario.py"), title="Información del Usuario")
 
 pg = st.navigation([pagina_1, pagina_2, pagina_3], position="hidden")
 
 with st.sidebar:
-    st.image("image_5976e1.png", use_container_width=True)
+    st.image(str(BASE_DIR / "image_5976e1.png"), use_container_width=True)
     st.divider()
     st.markdown("### Menú")
     st.page_link(pagina_1, label="Hojas de Verificación")
