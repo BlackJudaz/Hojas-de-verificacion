@@ -26,8 +26,8 @@ with st.sidebar:
     st.image("image_5976e1.png", use_container_width=True)
     st.divider()
     st.markdown("### Menú")
-    st.page_link(pagina_1, label="🔧 Hojas de Verificación")
-    st.page_link(pagina_2, label="📂 Inventario")
-    st.page_link(pagina_3, label="👤 Información del Usuario")
+    st.page_link(pagina_1, label="Hojas de Verificación")
+    st.page_link(pagina_2, label="Inventario")
+    st.page_link(pagina_3, label="Información del Usuario")
 
 pg.run()
