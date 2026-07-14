@@ -1,3 +1,4 @@
+# utils/lector_inventario.py
 import pandas as pd
 import re
 import unicodedata
