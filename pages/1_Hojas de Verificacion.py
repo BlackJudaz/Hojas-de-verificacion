@@ -1,11 +1,14 @@
-#Hojas de verificación
-
 import re
 import streamlit as st
 from datetime import datetime
 
 from utils.gestor_plantillas import crear_paquete_reporte
-from utils.lector_analizadores import cargar_analizadores, buscar_analizadores_por_concepto, obtener_analizadores_display
+from utils.lector_analizadores import (
+    cargar_analizadores,
+    buscar_analizadores_por_concepto,
+    obtener_analizadores_display,
+    parse_analizador_display
+)
 from utils.lector_inventario import aplicar_filtros, opciones_disponibles, df_con_filtros
 
 config = {
@@ -13,18 +16,6 @@ config = {
     "jefe":     st.session_state.get("nombre_jefe", ""),
     "hospital": st.session_state.get("nombre_hospital", "")
 }
-
-
-def parse_analizador_display(opcion):
-    if not opcion:
-        return {"tipo": "", "marca": "", "modelo": "", "serie": ""}
-    partes = [parte.strip() for parte in str(opcion).split("|")]
-    return {
-        "tipo": partes[0] if len(partes) > 0 else "",
-        "marca": partes[1] if len(partes) > 1 else "",
-        "modelo": partes[2] if len(partes) > 2 else "",
-        "serie": partes[3] if len(partes) > 3 else ""
-    }
 
 
 def inicializar_estado():
@@ -61,7 +52,7 @@ if st.session_state.inventario_df is None:
 
 analizadores_df = cargar_analizadores()
 if analizadores_df is None:
-    st.warning("No se pudo cargar la lista de analizadores. Las hojas de verificación se pueden generar, pero no se podrán seleccionar analizadores recomendados.")
+    st.warning("No se pudo cargar la lista de analizadores.")
 
 df = st.session_state.inventario_df
 
@@ -70,16 +61,16 @@ with st.container(border=True):
     col_filtros, col_acciones = st.columns([8, 2])
     with col_filtros:
         estados = {
-            "filtro_concepto": st.session_state.filtro_concepto,
-            "filtro_marca": st.session_state.filtro_marca,
-            "filtro_activo": st.session_state.filtro_activo,
+            "filtro_concepto":  st.session_state.filtro_concepto,
+            "filtro_marca":     st.session_state.filtro_marca,
+            "filtro_activo":    st.session_state.filtro_activo,
             "filtro_ubicacion": st.session_state.filtro_ubicacion
         }
         opciones = {
-            "CONCEPTO": opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_concepto"), "CONCEPTO"),
-            "MARCA":    opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_marca"), "MARCA"),
-            "# ACTIVO": opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_activo"), "# ACTIVO"),
-            "UBICACIÓN":opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_ubicacion"), "UBICACIÓN")
+            "CONCEPTO":  opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_concepto"), "CONCEPTO"),
+            "MARCA":     opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_marca"), "MARCA"),
+            "# ACTIVO":  opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_activo"), "# ACTIVO"),
+            "UBICACIÓN": opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_ubicacion"), "UBICACIÓN")
         }
 
         fila1_col1, fila1_col2 = st.columns(2)
@@ -138,31 +129,36 @@ if st.session_state.clic_buscar:
         st.success(f"Se seleccionaron {len(equipos_a_mantener)} equipos")
 
         conceptos_seleccionados = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
+
+        # ── Periodicidad ─────────────────────────────────────────────────────
         st.markdown("### Periodicidad de mantenimiento por tipo de activo")
         opciones_periodicidad = ["Bimestral", "Cuatrimestral", "Semestral", "Anual"]
         periodicidades_por_concepto = st.session_state.periodicidad_por_concepto.copy()
 
         for concepto in conceptos_seleccionados:
-            clave_periodicidad = f"periodicidad_{re.sub(r'\W+', '_', concepto.strip().lower()).strip('_')}"
-            default_period = periodicidades_por_concepto.get(concepto, "Anual")
-            if default_period not in opciones_periodicidad:
-                default_period = "Anual"
-            seleccion_periodicidad = st.selectbox(
-                label=f"Periodicidad de mantenimiento para {concepto}",
+            clave_limpia = re.sub(r'\W+', '_', concepto.strip().lower()).strip('_')
+            clave = f"periodicidad_{clave_limpia}"            
+            default = periodicidades_por_concepto.get(concepto, "Anual")
+            if default not in opciones_periodicidad:
+                default = "Anual"
+            seleccion = st.selectbox(
+                label=f"Periodicidad para {concepto}",
                 options=opciones_periodicidad,
-                index=opciones_periodicidad.index(default_period),
-                key=clave_periodicidad
+                index=opciones_periodicidad.index(default),
+                key=clave
             )
-            periodicidades_por_concepto[concepto] = seleccion_periodicidad
+            periodicidades_por_concepto[concepto] = seleccion
 
         st.session_state.periodicidad_por_concepto = periodicidades_por_concepto
-        equipos_a_mantener["PERIODICIDAD"] = equipos_a_mantener["CONCEPTO"].map(periodicidades_por_concepto).fillna("Anual")
+        equipos_a_mantener["PERIODICIDAD"] = equipos_a_mantener["CONCEPTO"].map(
+            periodicidades_por_concepto).fillna("Anual")
 
+        # ── Analizadores ──────────────────────────────────────────────────────
         analizador_seleccionado_por_concepto = []
         analizadores_por_concepto = {}
 
         if analizadores_df is not None:
-            st.markdown("### Selección automática de analizadores por tipo de equipo")
+            st.markdown("### Selección de analizadores por tipo de equipo")
             for concepto in conceptos_seleccionados:
                 sugeridos = buscar_analizadores_por_concepto(analizadores_df, [concepto])
                 opciones_sugeridas = obtener_analizadores_display(sugeridos)
@@ -174,21 +170,27 @@ if st.session_state.clic_buscar:
                 if opciones_sugeridas:
                     st.markdown(f"**{concepto}**")
                     seleccion = st.multiselect(
-                        label=f"Analizadores utilizados para {concepto}",
+                        label=f"Analizadores para {concepto}",
                         options=opciones_sugeridas,
                         default=st.session_state.get(key, []),
                         key=key
                     )
                     analizador_seleccionado_por_concepto.extend(seleccion)
-                    analizadores_por_concepto[concepto] = [parse_analizador_display(item) for item in seleccion]
+                    analizadores_por_concepto[concepto] = [
+                        parse_analizador_display(item) for item in seleccion
+                    ]
                 else:
-                    st.warning(f"No se encontraron analizadores recomendados para {concepto}.")
-                    st.info("Selecciona manualmente los analizadores usados si lo conoces.")
-                    analizadores_por_concepto[concepto] = [parse_analizador_display(item) for item in st.session_state.get(key, [])]
+                    st.warning(f"No se encontraron analizadores recomendados para '{concepto}'.")
+                    analizadores_por_concepto[concepto] = [
+                        parse_analizador_display(item)
+                        for item in st.session_state.get(key, [])
+                    ]
 
-        st.session_state["analizadores_seleccionados"] = list(dict.fromkeys(analizador_seleccionado_por_concepto))
+        st.session_state["analizadores_seleccionados"] = list(
+            dict.fromkeys(analizador_seleccionado_por_concepto))
         st.session_state["analizadores_por_concepto"] = analizadores_por_concepto
 
+        # ── Nombre del paquete ────────────────────────────────────────────────
         nombre_carpeta = st.text_input(
             "Nombre del paquete",
             value=f"reporte_{datetime.now():%Y%m%d_%H%M%S}",
@@ -198,6 +200,7 @@ if st.session_state.clic_buscar:
             nombre_carpeta = f"reporte_{datetime.now():%Y%m%d_%H%M%S}"
         nombre_carpeta = re.sub(r"\W+", "_", nombre_carpeta).strip("_")
 
+        # ── Generar ───────────────────────────────────────────────────────────
         col_boton, col_hojas, col_etiquetas = st.columns([4, 3, 3])
         with col_boton:
             generar = st.button("Generar archivo", type="primary", use_container_width=True)
@@ -214,25 +217,25 @@ if st.session_state.clic_buscar:
                 status_text  = st.empty()
 
                 buffer_zip, errores, exitos = crear_paquete_reporte(
-                    equipos                   = equipos_a_mantener,
-                    nombre_carpeta            = nombre_carpeta,
-                    ingeniero                 = config.get("nombre", ""),
-                    jefe                      = config.get("jefe", ""),
-                    hospital                  = config.get("hospital", ""),
-                    progress_bar              = progress_bar,
-                    status_text               = status_text,
-                    hacer_hojas               = hacer_hojas,
-                    hacer_etiquetas           = hacer_etiquetas,
-                    analizadores_por_concepto = st.session_state.get("analizadores_por_concepto", {}),
+                    equipos                    = equipos_a_mantener,
+                    nombre_carpeta             = nombre_carpeta,
+                    ingeniero                  = config.get("nombre", ""),
+                    jefe                       = config.get("jefe", ""),
+                    hospital                   = config.get("hospital", ""),
+                    progress_bar               = progress_bar,
+                    status_text                = status_text,
+                    hacer_hojas                = hacer_hojas,
+                    hacer_etiquetas            = hacer_etiquetas,
+                    analizadores_por_concepto  = st.session_state.get("analizadores_por_concepto", {}),
                     analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", [])
                 )
 
                 if exitos > 0 or hacer_etiquetas:
                     st.download_button(
-                        label            = "⬇️ Descargar Paquete (.zip)",
-                        data             = buffer_zip,
-                        file_name        = f"{nombre_carpeta}.zip",
-                        mime             = "application/zip",
+                        label               = "⬇️ Descargar Paquete (.zip)",
+                        data                = buffer_zip,
+                        file_name           = f"{nombre_carpeta}.zip",
+                        mime                = "application/zip",
                         use_container_width = True
                     )
 

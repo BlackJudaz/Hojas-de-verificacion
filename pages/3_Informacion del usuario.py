@@ -1,10 +1,7 @@
-#Informacion del usuario
-
 import streamlit as st
 
 st.title("👤 Información del Usuario")
 st.info("Esta información se usará para generar las hojas de verificación y etiquetas. Deberás llenarla cada vez que abras la aplicación.")
-
 st.divider()
 
 with st.container(border=True):
@@ -13,13 +10,11 @@ with st.container(border=True):
         value=st.session_state.nombre_ingeniero,
         placeholder="Ej. Jose Andres Quijada Lopez"
     )
-
     nombre_jefe = st.text_input(
         label="Nombre del Jefe de Departamento",
         value=st.session_state.nombre_jefe,
         placeholder="Ej. Dr. Juan Pérez"
     )
-
     nombre_hospital = st.text_input(
         label="Nombre del Hospital",
         value=st.session_state.nombre_hospital,
@@ -37,10 +32,9 @@ with st.container(border=True):
 
 st.divider()
 
-# Mostrar resumen de lo guardado
 if st.session_state.nombre_ingeniero:
     st.markdown(f"👤 **Ingeniero:** {st.session_state.nombre_ingeniero}")
-    st.markdown(f"🏥 **Jefe:** {st.session_state.nombre_jefe}")
+    st.markdown(f"👔 **Jefe:** {st.session_state.nombre_jefe}")
     st.markdown(f"🏥 **Hospital:** {st.session_state.nombre_hospital}")
 else:
     st.warning("⚠️ Aún no has guardado tu información.")

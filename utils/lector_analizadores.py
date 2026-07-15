@@ -1,7 +1,5 @@
-# utils/lector_analizadores.py
 from pathlib import Path
 import re
-
 import pandas as pd
 
 RUTA_ANALIZADORES = Path(__file__).resolve().parent.parent / "datos" / "analizadores_bel.xlsx"
@@ -34,7 +32,7 @@ def cargar_analizadores(ruta=RUTA_ANALIZADORES):
 
 def obtener_analizadores(df):
     """
-    Retorna la lista de tipos de analizadores disponible en la hoja.
+    Retorna la lista de tipos de analizadores disponibles.
     """
     if df is None or df.empty:
         return []
@@ -56,9 +54,25 @@ def obtener_analizadores_display(df):
     ).tolist()
 
 
+def parse_analizador_display(opcion):
+    """
+    Convierte una opción de display 'tipo | marca | modelo | serie'
+    en un diccionario con los campos separados.
+    """
+    if not opcion:
+        return {"tipo": "", "marca": "", "modelo": "", "serie": ""}
+    partes = [parte.strip() for parte in str(opcion).split("|")]
+    return {
+        "tipo":   partes[0] if len(partes) > 0 else "",
+        "marca":  partes[1] if len(partes) > 1 else "",
+        "modelo": partes[2] if len(partes) > 2 else "",
+        "serie":  partes[3] if len(partes) > 3 else ""
+    }
+
+
 def buscar_analizadores_por_concepto(df, conceptos):
     """
-    Busca analizadores cuyos nombres coincidan con palabras del concepto seleccionado.
+    Busca analizadores cuyos nombres coincidan con palabras del concepto.
     """
     if df is None or df.empty or not conceptos:
         return df
@@ -95,6 +109,6 @@ def filtrar_analizadores(df, tipo=None, marca=None, modelo=None, serie=None):
     if modelo:
         resultado = resultado[resultado["MODELO"] == modelo]
     if serie:
-        serie_str = str(serie).strip()
-        resultado = resultado[resultado["NUM. DE SERIE"].str.contains(serie_str, case=False, na=False)]
+        resultado = resultado[resultado["NUM. DE SERIE"].str.contains(
+            str(serie).strip(), case=False, na=False)]
     return resultado.reset_index(drop=True)
