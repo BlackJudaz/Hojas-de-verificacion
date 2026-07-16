@@ -83,7 +83,12 @@ def _escribir_valor(ws, fila, columna, valor):
 def _llenar_analizadores(ws, analizadores):
     def _parse_value(value):
         if isinstance(value, dict):
-            return value
+            return {
+                "tipo": value.get("tipo", value.get("Analizador", value.get("analizador", ""))),
+                "marca": value.get("marca", ""),
+                "modelo": value.get("modelo", ""),
+                "serie": value.get("serie", "")
+            }
         if not value:
             return {"tipo": "", "marca": "", "modelo": "", "serie": ""}
         partes = [parte.strip() for parte in str(value).split("|")]
@@ -249,7 +254,8 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                            hacer_hojas=True, hacer_etiquetas=True,
                            analizador=None,
                            analizadores_por_concepto=None,
-                           analizadores_seleccionados=None):
+                           analizadores_seleccionados=None,
+                           fecha_mantenimiento_base=None):
     buffer_zip = BytesIO()
     errores    = []
     exitos     = 0
@@ -304,7 +310,11 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
 
         if hacer_etiquetas:
             status_text.text("Generando etiquetas PDF...")
-            ruta_pdf = crear_etiquetas_pdf(equipos, ingeniero)
+            ruta_pdf = crear_etiquetas_pdf(
+                equipos,
+                ingeniero,
+                fecha_mantenimiento_base=fecha_mantenimiento_base
+            )
             if os.path.exists(ruta_pdf):
                 zip_file.write(ruta_pdf, arcname=f"{nombre_carpeta}/etiquetas_mantenimiento.pdf")
                 os.remove(ruta_pdf)
@@ -350,7 +360,13 @@ def _calcular_siguiente_mantenimiento(fecha, periodicidad):
     return fecha.replace(year=fecha.year + 1)
 
 
-def crear_etiquetas_pdf(equipos, ingeniero=None):
+def _resolver_fecha_base(fecha_hoy, fecha_mantenimiento_base):
+    if fecha_mantenimiento_base is None:
+        return fecha_hoy
+    return fecha_mantenimiento_base
+
+
+def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
@@ -410,14 +426,13 @@ def crear_etiquetas_pdf(equipos, ingeniero=None):
         c.setFont("Helvetica", fuente_campos)
         c.drawString(x + 2*mm,  y_fecha + 4*mm, "Fecha:")
         c.line(x + 11*mm, y_fecha + 3.5*mm, x + 29*mm, y_fecha + 3.5*mm)
-        fecha_hoy = date.today()
-        # Fecha en formato 'Mes Año'
-        fecha_actual = _formato_mes_anio(fecha_hoy)
+        periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
+        fecha_etiqueta = _resolver_fecha_base(fecha_hoy_obj, fecha_mantenimiento_base)
+        fecha_actual = _formato_mes_anio(fecha_etiqueta)
         c.drawString(x + 11*mm, y_fecha + 4*mm, fecha_actual)
 
         # ── Próximo mantenimiento ───────────────────────────────────────────
-        periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
-        fecha_siguiente_date = _calcular_siguiente_mantenimiento(fecha_hoy, periodicidad)
+        fecha_siguiente_date = _calcular_siguiente_mantenimiento(fecha_etiqueta, periodicidad)
         fecha_siguiente = _formato_mes_anio(fecha_siguiente_date)
         # Alinear 'Próximo' a la derecha manteniendo consistencia
         x_prox_label = x + aw - 38*mm

@@ -1,5 +1,6 @@
 import re
 import streamlit as st
+import pandas as pd
 from datetime import datetime
 
 from utils.gestor_plantillas import crear_paquete_reporte
@@ -27,6 +28,8 @@ def inicializar_estado():
         st.session_state.analizadores_seleccionados = []
     if "periodicidad_por_concepto" not in st.session_state:
         st.session_state.periodicidad_por_concepto = {}
+    if "analizadores_propios_por_concepto" not in st.session_state:
+        st.session_state.analizadores_propios_por_concepto = {}
     for key in ("filtro_concepto", "filtro_marca", "filtro_activo", "filtro_ubicacion"):
         if key not in st.session_state:
             st.session_state[key] = []
@@ -164,27 +167,99 @@ if st.session_state.clic_buscar:
                 opciones_sugeridas = obtener_analizadores_display(sugeridos)
                 clave_concepto = re.sub(r"\W+", "_", concepto.strip().lower()).strip("_")
                 key = f"analizadores_{clave_concepto}"
+                key_propios_flag = f"usar_analizadores_propios_{clave_concepto}"
+                key_propios_editor = f"analizadores_propios_editor_{clave_concepto}"
                 if key not in st.session_state:
                     st.session_state[key] = []
 
+                st.markdown(f"**{concepto}**")
+
+                seleccion = st.multiselect(
+                    label=f"Analizadores sugeridos para {concepto}",
+                    options=opciones_sugeridas,
+                    default=st.session_state.get(key, []),
+                    key=key,
+                    help="Selecciona analizadores recomendados o agrega analizadores propios abajo."
+                )
+                analizador_seleccionado_por_concepto.extend(seleccion)
+                analizadores_del_concepto = [
+                    parse_analizador_display(item) for item in seleccion
+                ]
+
                 if opciones_sugeridas:
-                    st.markdown(f"**{concepto}**")
-                    seleccion = st.multiselect(
-                        label=f"Analizadores para {concepto}",
-                        options=opciones_sugeridas,
-                        default=st.session_state.get(key, []),
-                        key=key
-                    )
-                    analizador_seleccionado_por_concepto.extend(seleccion)
-                    analizadores_por_concepto[concepto] = [
-                        parse_analizador_display(item) for item in seleccion
-                    ]
+                    pass
                 else:
                     st.warning(f"No se encontraron analizadores recomendados para '{concepto}'.")
-                    analizadores_por_concepto[concepto] = [
-                        parse_analizador_display(item)
-                        for item in st.session_state.get(key, [])
-                    ]
+
+                usar_propios = st.checkbox(
+                    f"Agregar analizadores propios para {concepto}",
+                    key=key_propios_flag,
+                    value=False
+                )
+
+                analizadores_propios = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                if usar_propios:
+                    datos_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                    if datos_guardados:
+                        datos_normalizados = []
+                        for item in datos_guardados:
+                            datos_normalizados.append({
+                                "tipo": item.get("tipo", item.get("Analizador", "")),
+                                "marca": item.get("marca", ""),
+                                "modelo": item.get("modelo", ""),
+                                "serie": item.get("serie", "")
+                            })
+                        df_propios_inicial = pd.DataFrame(datos_normalizados)
+                    else:
+                        df_propios_inicial = pd.DataFrame([
+                            {"tipo": "", "marca": "", "modelo": "", "serie": ""}
+                        ])
+
+                    with st.form(key=f"form_{key_propios_editor}", clear_on_submit=False):
+                        st.caption("Edita los analizadores propios y presiona Guardar para conservar cambios.")
+                        df_propios = st.data_editor(
+                            df_propios_inicial,
+                            key=key_propios_editor,
+                            use_container_width=True,
+                            hide_index=True,
+                            num_rows="dynamic",
+                            column_config={
+                                "tipo": "Tipo de Analizador",
+                                "marca": "Marca",
+                                "modelo": "Modelo",
+                                "serie": "Numero de serie"
+                            }
+                        )
+                        guardar_propios = st.form_submit_button(
+                            "Guardar analizadores propios",
+                            use_container_width=True
+                        )
+
+                    if guardar_propios:
+                        nuevos_analizadores_propios = []
+                        for _, fila in df_propios.fillna("").iterrows():
+                            tipo = str(fila.get("tipo", "")).strip()
+                            marca = str(fila.get("marca", "")).strip()
+                            modelo = str(fila.get("modelo", "")).strip()
+                            serie = str(fila.get("serie", "")).strip()
+
+                            if not any([tipo, marca, modelo, serie]):
+                                continue
+
+                            nuevos_analizadores_propios.append({
+                                "tipo": tipo,
+                                "marca": marca,
+                                "modelo": modelo,
+                                "serie": serie
+                            })
+
+                        st.session_state["analizadores_propios_por_concepto"][concepto] = nuevos_analizadores_propios
+                        analizadores_propios = nuevos_analizadores_propios
+                else:
+                    st.session_state["analizadores_propios_por_concepto"][concepto] = []
+                    analizadores_propios = []
+
+                analizadores_por_concepto[concepto] = analizadores_del_concepto + analizadores_propios
 
         st.session_state["analizadores_seleccionados"] = list(
             dict.fromkeys(analizador_seleccionado_por_concepto))
@@ -209,6 +284,20 @@ if st.session_state.clic_buscar:
         with col_etiquetas:
             hacer_etiquetas = st.checkbox("Etiquetas", value=True)
 
+        ingresar_fecha_mantenimiento_manual = st.checkbox(
+            "Ingresar fecha de mantenimiento manual",
+            value=False,
+            help="Si no se marca, se usará la fecha actual."
+        )
+
+        fecha_mantenimiento_base = None
+        if ingresar_fecha_mantenimiento_manual:
+            fecha_mantenimiento_base = st.date_input(
+                "Fecha de mantenimiento",
+                value=datetime.now().date(),
+                help="Selecciona la fecha base para las etiquetas."
+            )
+
         if generar:
             if not hacer_hojas and not hacer_etiquetas:
                 st.error("❌ Selecciona al menos una opción.")
@@ -227,7 +316,8 @@ if st.session_state.clic_buscar:
                     hacer_hojas                = hacer_hojas,
                     hacer_etiquetas            = hacer_etiquetas,
                     analizadores_por_concepto  = st.session_state.get("analizadores_por_concepto", {}),
-                    analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", [])
+                    analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", []),
+                    fecha_mantenimiento_base   = fecha_mantenimiento_base
                 )
 
                 if exitos > 0 or hacer_etiquetas:
