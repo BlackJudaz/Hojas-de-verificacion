@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Captura TiNC</title>
+  <script src="https://unpkg.com/streamlit-component-lib@1.4.0/dist/index.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+    }
+
+    .wrap {
+      display: grid;
+      gap: 8px;
+    }
+
+    .hint {
+      color: #6b7280;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      padding: 12px 14px;
+      font: inherit;
+      box-sizing: border-box;
+      background: transparent;
+      color: inherit;
+    }
+
+    textarea:focus {
+      outline: 2px solid rgba(59, 130, 246, 0.55);
+      border-color: rgba(59, 130, 246, 0.55);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hint">Pega aquí la programación de TiNC. Se capturará el texto y, cuando exista, también el hipervínculo original.</div>
+    <textarea id="pasteArea" placeholder="Pega aquí el contenido completo..."></textarea>
+  </div>
+
+  <script>
+    const textarea = document.getElementById("pasteArea");
+    let lastHtml = "";
+
+    function sendValue(plain, html) {
+      Streamlit.setComponentValue({
+        plain: plain || "",
+        html: html || "",
+      });
+    }
+
+    function syncHeight() {
+      Streamlit.setFrameHeight(document.body.scrollHeight);
+    }
+
+    function onRender(event) {
+      const args = (event && event.detail && event.detail.args) || {};
+      const incomingValue = args.value || "";
+      const incomingHeight = Number(args.height || 260);
+
+      if (document.activeElement !== textarea && textarea.value !== incomingValue) {
+        textarea.value = incomingValue;
+      }
+
+      textarea.style.minHeight = `${incomingHeight}px`;
+      syncHeight();
+    }
+
+    textarea.addEventListener("paste", (event) => {
+      const html = event.clipboardData.getData("text/html") || "";
+      const plain = event.clipboardData.getData("text/plain") || "";
+      lastHtml = html || lastHtml;
+
+      window.setTimeout(() => {
+        sendValue(textarea.value || plain, html || lastHtml);
+        syncHeight();
+      }, 0);
+    });
+
+    textarea.addEventListener("input", () => {
+      sendValue(textarea.value, lastHtml);
+      syncHeight();
+    });
+
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+    Streamlit.setComponentReady();
+    syncHeight();
+  </script>
+</body>
+</html>

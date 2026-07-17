@@ -2,6 +2,7 @@
 import pandas as pd
 import re
 import unicodedata
+from html import unescape
 
 COLUMNAS_INVENTARIO = {
     "# ACTIVO": [
@@ -247,3 +248,161 @@ def df_con_filtros(df, estados_filtros, excluir=None):
         if seleccion:
             filtros[columna] = seleccion
     return aplicar_filtros(df, filtros)
+
+
+def _limpiar_fragmento_html(fragmento):
+    fragmento = re.sub(r"<br\s*/?>", " ", str(fragmento), flags=re.IGNORECASE)
+    fragmento = re.sub(r"</(div|p|tr|td|li|span)>", " ", fragmento, flags=re.IGNORECASE)
+    fragmento = re.sub(r"<[^>]+>", "", fragmento)
+    fragmento = unescape(fragmento)
+    return re.sub(r"\s+", " ", fragmento).strip()
+
+
+def parsear_programacion_tinc(texto, html_texto=""):
+    """
+    Convierte el texto pegado de programación TINC en una tabla con folio e ID TINC.
+    Espera bloques donde aparezca un folio SER... y un ID de activo AST... por registro.
+    """
+    if texto is None:
+        return pd.DataFrame(columns=["folio", "url", "id_tinc", "bloque"])
+
+    texto = str(texto).strip()
+    if not texto:
+        return pd.DataFrame(columns=["folio", "url", "id_tinc", "bloque"])
+
+    texto = texto.replace("\r", "\n")
+    html_texto = str(html_texto or "").strip()
+    filas = []
+
+    def _extraer_url_tinc(bloque, url_inicial=""):
+        candidatos = []
+        if url_inicial:
+            candidatos.append(str(url_inicial).strip())
+
+        candidatos.extend(re.findall(r"(?:https?|vscode-file|file)://[^\s)]+", str(bloque), flags=re.IGNORECASE))
+
+        for candidato in candidatos:
+            candidato = str(candidato).strip()
+            if "app.cmmstinc.com" in candidato.lower():
+                return candidato
+        return ""
+
+    patron_bloque = re.compile(
+        r"\[(SER\d+)\]\(([^)]+)\)(.*?)(?=\[SER\d+\]\([^)]+\)|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    patron_html = re.compile(
+        r"<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>\s*(SER\d+)\s*</a>(.*?)(?=<a[^>]*href=|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if html_texto:
+        for match in patron_html.finditer(html_texto):
+            folio = match.group(2).upper()
+            url = _extraer_url_tinc(match.group(3), match.group(1))
+            bloque = _limpiar_fragmento_html(folio + " " + match.group(3))
+            id_match = re.search(r"AST\d+", bloque, flags=re.IGNORECASE)
+            if not id_match:
+                continue
+
+            filas.append({
+                "folio": folio,
+                "url": url,
+                "id_tinc": id_match.group(0).upper(),
+                "bloque": bloque
+            })
+
+    if not filas:
+        for match in patron_bloque.finditer(texto):
+            folio = match.group(1).upper()
+            url = _extraer_url_tinc(match.group(3), match.group(2))
+            bloque = (match.group(1) + match.group(3)).strip()
+            id_match = re.search(r"AST\d+", bloque, flags=re.IGNORECASE)
+            if not id_match:
+                continue
+
+            filas.append({
+                "folio": folio,
+                "url": url,
+                "id_tinc": id_match.group(0).upper(),
+                "bloque": bloque
+            })
+
+    if not filas:
+        texto_limpio = re.sub(r"\s+", " ", texto).strip()
+        coincidencias_folio = list(re.finditer(r"SER\d+", texto_limpio, flags=re.IGNORECASE))
+        for indice, coincidencia in enumerate(coincidencias_folio):
+            inicio = coincidencia.start()
+            fin = coincidencias_folio[indice + 1].start() if indice + 1 < len(coincidencias_folio) else len(texto_limpio)
+            bloque = texto_limpio[inicio:fin].strip()
+            folio = coincidencia.group(0).upper()
+            url = _extraer_url_tinc(bloque)
+            id_match = re.search(r"AST\d+", bloque, flags=re.IGNORECASE)
+            if not id_match:
+                continue
+
+            filas.append({
+                "folio": folio,
+                "url": url,
+                "id_tinc": id_match.group(0).upper(),
+                "bloque": bloque
+            })
+
+    df = pd.DataFrame(filas, columns=["folio", "url", "id_tinc", "bloque"])
+    if not df.empty:
+        df = df.drop_duplicates(subset=["id_tinc"], keep="first").reset_index(drop=True)
+    return df
+
+
+def aplicar_programacion_tinc(df_inventario, df_programacion):
+    """
+    Agrega al inventario las columnas ID TINC y FOLIO TINC con base en la programación cargada.
+    """
+    if df_inventario is None:
+        return None
+
+    df = df_inventario.copy()
+    if df_programacion is None or df_programacion.empty:
+        if "ID TINC" not in df.columns:
+            df["ID TINC"] = df.get("# ACTIVO", "")
+        if "FOLIO TINC" not in df.columns:
+            df["FOLIO TINC"] = ""
+        if "URL TINC" not in df.columns:
+            df["URL TINC"] = ""
+        return df
+
+    mapa_folios = (
+        df_programacion.dropna(subset=["id_tinc", "folio"])
+        .assign(id_tinc=lambda x: x["id_tinc"].astype(str).str.strip().str.upper())
+        .assign(folio=lambda x: x["folio"].astype(str).str.strip().str.upper())
+        .drop_duplicates(subset=["id_tinc"], keep="first")
+        .set_index("id_tinc")["folio"]
+        .to_dict()
+    )
+    mapa_urls = (
+        df_programacion.dropna(subset=["id_tinc", "folio"])
+        .assign(id_tinc=lambda x: x["id_tinc"].astype(str).str.strip().str.upper())
+        .assign(url=lambda x: x["url"].astype(str).str.strip() if "url" in x.columns else "")
+        .drop_duplicates(subset=["id_tinc"], keep="first")
+        .set_index("id_tinc")["url"]
+        .to_dict()
+    )
+
+    if "ID TINC" not in df.columns:
+        df["ID TINC"] = df.get("# ACTIVO", "")
+    else:
+        df["ID TINC"] = df["ID TINC"].fillna("").astype(str).str.strip()
+    if "URL TINC" not in df.columns:
+        df["URL TINC"] = ""
+
+    activos = df.get("# ACTIVO", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.strip().str.upper()
+    ids_tinc = df["ID TINC"].fillna("").astype(str).str.strip().str.upper()
+    df["FOLIO TINC"] = activos.map(mapa_folios).fillna("")
+    df["URL TINC"] = activos.map(mapa_urls).fillna("")
+    faltantes = df["FOLIO TINC"].eq("")
+    if faltantes.any():
+        df.loc[faltantes, "FOLIO TINC"] = ids_tinc[faltantes].map(mapa_folios).fillna("")
+        df.loc[faltantes, "URL TINC"] = ids_tinc[faltantes].map(mapa_urls).fillna("")
+
+    return df

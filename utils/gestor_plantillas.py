@@ -5,7 +5,7 @@ import unicodedata
 import zipfile
 from io import BytesIO
 from openpyxl import load_workbook
-from datetime import date
+from datetime import date, datetime
 
 RUTA_MAPEO = "datos/mapeo_plantillas.json"
 RUTA_PLANTILLAS = "datos/hojas_de_verificacion.xlsx"
@@ -148,6 +148,35 @@ def _obtener_celdas_firma_por_pestana(pestana):
     return celdas.get(str(pestana).strip().upper(), (None, None))
 
 
+def _obtener_celda_folio_por_pestana(pestana):
+    """Devuelve la celda donde debe escribirse el folio de programación del mes."""
+    celdas = {
+        "UNIDAD DE ELECTROCIRUGIA": "AF8",
+        "CENTRIFUGA": "AF8",
+        "BASCULA": "AF8",
+        "CAMA": "AF8",
+        "MESA DE EXPLORACION": "AF8",
+        "SIERRA": "AF8",
+        "MAQUINA DE ANESTESIA": "AE8",
+        "DESFIBRILADOR": "AE8",
+        "MONITOR DE SIGNOS VITALES": "AE8",
+    }
+    return celdas.get(str(pestana).strip().upper())
+
+
+def _escribir_valor_con_link(ws, celda_ref, valor, url=None):
+    celda = ws[celda_ref]
+    if url:
+        valor = str(valor or "").replace('"', '""')
+        url = str(url).strip().replace('"', '""')
+        celda.value = f'=HYPERLINK("{url}","{valor}")'
+        celda.hyperlink = url
+        celda.style = "Hyperlink"
+    else:
+        celda.value = valor
+        celda.hyperlink = None
+
+
 def _normalize_text(s):
     if s is None:
         return ""
@@ -205,6 +234,14 @@ def generar_reporte(equipo, ingeniero, jefe, hospital, analizadores=None):
         ws["G12"] = hospital
         ws["G13"] = equipo.get("UBICACIÓN", "")
         ws["G14"] = equipo.get("# ACTIVO", equipo.get("ID TINC", equipo.get("id tinc", "")))
+        celda_folio = _obtener_celda_folio_por_pestana(pestana)
+        if celda_folio:
+            _escribir_valor_con_link(
+                ws,
+                celda_folio,
+                equipo.get("FOLIO TINC", equipo.get("FOLIO", "")),
+                equipo.get("URL TINC", equipo.get("URL", ""))
+            )
         ws["AA12"] = equipo.get("MARCA", "")
         ws["AA13"] = equipo.get("MODELO", "")
         ws["AA14"] = equipo.get("No. DE SERIE", "")
@@ -235,7 +272,7 @@ def generar_reporte(equipo, ingeniero, jefe, hospital, analizadores=None):
         tipo_activo = _normalizar_nombre_archivo(_obtener_tipo_activo(equipo))
         identificador = _normalizar_nombre_archivo(_obtener_identificador_activo(equipo))
         # Nuevo formato: ID TINC TIPO ACTIVO (sin comillas)
-        nombre_archivo = f"Lista de Verificación {identificador} {tipo_activo}.xlsx"
+        nombre_archivo = f"{identificador} {tipo_activo}.xlsx"
         ruta_destino = os.path.join(RUTA_REPORTES, nombre_archivo)
 
         hojas_a_eliminar = [h for h in wb.sheetnames if h != pestana]
@@ -361,9 +398,56 @@ def _calcular_siguiente_mantenimiento(fecha, periodicidad):
 
 
 def _resolver_fecha_base(fecha_hoy, fecha_mantenimiento_base):
-    if fecha_mantenimiento_base is None:
+    return _normalizar_fecha_mantenimiento(fecha_mantenimiento_base, fecha_hoy)
+
+
+def _normalizar_fecha_mantenimiento(valor, fecha_por_defecto):
+    if valor is None:
+        return fecha_por_defecto
+
+    if isinstance(valor, datetime):
+        return valor.date()
+
+    if isinstance(valor, date):
+        return valor
+
+    if hasattr(valor, "date") and callable(getattr(valor, "date")):
+        try:
+            return valor.date()
+        except Exception:
+            pass
+
+    if isinstance(valor, dict):
+        for clave in ("value", "date", "fecha", "selected"):
+            if clave in valor:
+                return _normalizar_fecha_mantenimiento(valor.get(clave), fecha_por_defecto)
+
+        for item in valor.values():
+            fecha_normalizada = _normalizar_fecha_mantenimiento(item, None)
+            if fecha_normalizada is not None:
+                return fecha_normalizada
+        return fecha_por_defecto
+
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto:
+            return fecha_por_defecto
+        try:
+            return datetime.fromisoformat(texto).date()
+        except ValueError:
+            return fecha_por_defecto
+
+    return fecha_por_defecto
+
+
+def _resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base):
+    if isinstance(fecha_mantenimiento_base, dict):
+        concepto = str(row.get("CONCEPTO", "")).strip()
+        fecha_concepto = fecha_mantenimiento_base.get(concepto)
+        if fecha_concepto is not None:
+            return _normalizar_fecha_mantenimiento(fecha_concepto, fecha_hoy)
         return fecha_hoy
-    return fecha_mantenimiento_base
+    return _resolver_fecha_base(fecha_hoy, fecha_mantenimiento_base)
 
 
 def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
@@ -427,7 +511,7 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         c.drawString(x + 2*mm,  y_fecha + 4*mm, "Fecha:")
         c.line(x + 11*mm, y_fecha + 3.5*mm, x + 29*mm, y_fecha + 3.5*mm)
         periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
-        fecha_etiqueta = _resolver_fecha_base(fecha_hoy_obj, fecha_mantenimiento_base)
+        fecha_etiqueta = _resolver_fecha_base_por_equipo(row, fecha_hoy_obj, fecha_mantenimiento_base)
         fecha_actual = _formato_mes_anio(fecha_etiqueta)
         c.drawString(x + 11*mm, y_fecha + 4*mm, fecha_actual)
 

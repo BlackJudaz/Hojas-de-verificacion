@@ -14,6 +14,11 @@ if "nombre_jefe" not in st.session_state:
 if "nombre_hospital" not in st.session_state:
     st.session_state.nombre_hospital = ""
 
+inventario_cargado = st.session_state.inventario_df is not None
+informacion_usuario_completa = bool(
+    str(st.session_state.nombre_ingeniero).strip() and str(st.session_state.nombre_hospital).strip()
+)
+
 pagina_1 = st.Page(str(BASE_DIR / "pages" / "1_Hojas de Verificacion.py"), title="Hojas de Verificación")
 pagina_2 = st.Page(str(BASE_DIR / "pages" / "2_Inventario.py"), title="Cargar Inventario")
 pagina_3 = st.Page(str(BASE_DIR / "pages" / "3_Informacion del usuario.py"), title="Información del Usuario")
@@ -27,5 +32,10 @@ with st.sidebar:
     st.page_link(pagina_1, label="🔧 Hojas de Verificación")
     st.page_link(pagina_2, label="📂 Inventario")
     st.page_link(pagina_3, label="👤 Información del Usuario")
+    st.divider()
+    st.markdown("### Estado rápido")
+    st.write(f"{'✅' if inventario_cargado else '⬜'} Inventario cargado")
+    st.write(f"{'✅' if informacion_usuario_completa else '⬜'} Información del usuario lista")
+    #st.caption("Orden recomendado: 1) Información del usuario, 2) Inventario, 3) Hojas de verificación.")
 
 pg.run()

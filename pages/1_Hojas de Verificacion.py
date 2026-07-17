@@ -30,6 +30,8 @@ def inicializar_estado():
         st.session_state.periodicidad_por_concepto = {}
     if "analizadores_propios_por_concepto" not in st.session_state:
         st.session_state.analizadores_propios_por_concepto = {}
+    if "fecha_mantenimiento_por_concepto" not in st.session_state:
+        st.session_state.fecha_mantenimiento_por_concepto = {}
     for key in ("filtro_concepto", "filtro_marca", "filtro_activo", "filtro_ubicacion"):
         if key not in st.session_state:
             st.session_state[key] = []
@@ -44,7 +46,8 @@ def limpiar_filtros():
 
 
 # ── Inicio de la página ──────────────────────────────────────────────────────
-st.title("Genera Hojas de Verificación")
+st.title("Generador de Hojas de Verificación")
+st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
 
 inicializar_estado()
 
@@ -61,6 +64,8 @@ df = st.session_state.inventario_df
 
 # ── Filtros ──────────────────────────────────────────────────────────────────
 with st.container(border=True):
+    st.markdown("### 1. Filtra los equipos")
+    st.caption("Puedes filtrar por concepto, marca, número de activo o ubicación antes de seleccionar los equipos.")
     col_filtros, col_acciones = st.columns([8, 2])
     with col_filtros:
         estados = {
@@ -79,21 +84,21 @@ with st.container(border=True):
         fila1_col1, fila1_col2 = st.columns(2)
         with fila1_col1:
             st.multiselect(label="Concepto", options=opciones["CONCEPTO"],
-                           key="filtro_concepto", placeholder="Concepto",
+                           key="filtro_concepto", placeholder="Selecciona uno o varios conceptos",
                            label_visibility="collapsed")
         with fila1_col2:
             st.multiselect(label="Marca", options=opciones["MARCA"],
-                           key="filtro_marca", placeholder="Marca",
+                           key="filtro_marca", placeholder="Selecciona una o varias marcas",
                            label_visibility="collapsed")
 
         fila2_col1, fila2_col2 = st.columns(2)
         with fila2_col1:
             st.multiselect(label="Activo", options=opciones["# ACTIVO"],
-                           key="filtro_activo", placeholder="Activo",
+                           key="filtro_activo", placeholder="Selecciona uno o varios activos",
                            label_visibility="collapsed")
         with fila2_col2:
             st.multiselect(label="Ubicación", options=opciones["UBICACIÓN"],
-                           key="filtro_ubicacion", placeholder="Ubicacion",
+                           key="filtro_ubicacion", placeholder="Selecciona una o varias ubicaciones",
                            label_visibility="collapsed")
 
     with col_acciones:
@@ -117,6 +122,8 @@ if st.session_state.clic_buscar:
     ]
 
     with st.container(border=True):
+        st.markdown("### 2. Selecciona los equipos")
+        st.caption("Marca una o varias filas de la tabla para preparar sus hojas de verificación y etiquetas.")
         seleccion_tabla = st.dataframe(
             df_final[columnas_mostrar],
             use_container_width=True,
@@ -130,6 +137,7 @@ if st.session_state.clic_buscar:
     if filas_seleccionadas:
         equipos_a_mantener = df_final.iloc[filas_seleccionadas].copy()
         st.success(f"Se seleccionaron {len(equipos_a_mantener)} equipos")
+        st.caption("Completa la periodicidad y los analizadores de cada tipo de activo antes de generar el paquete.")
 
         conceptos_seleccionados = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
 
@@ -164,7 +172,7 @@ if st.session_state.clic_buscar:
             st.markdown("### Selección de analizadores por tipo de equipo")
             for concepto in conceptos_seleccionados:
                 sugeridos = buscar_analizadores_por_concepto(analizadores_df, [concepto])
-                opciones_sugeridas = obtener_analizadores_display(sugeridos)
+                opciones_sugeridas = list(dict.fromkeys(obtener_analizadores_display(sugeridos)))
                 clave_concepto = re.sub(r"\W+", "_", concepto.strip().lower()).strip("_")
                 key = f"analizadores_{clave_concepto}"
                 key_propios_flag = f"usar_analizadores_propios_{clave_concepto}"
@@ -172,104 +180,189 @@ if st.session_state.clic_buscar:
                 if key not in st.session_state:
                     st.session_state[key] = []
 
-                st.markdown(f"**{concepto}**")
+                with st.container(border=True):
+                    st.markdown(f"#### {concepto}")
 
-                seleccion = st.multiselect(
-                    label=f"Analizadores sugeridos para {concepto}",
-                    options=opciones_sugeridas,
-                    default=st.session_state.get(key, []),
-                    key=key,
-                    help="Selecciona analizadores recomendados o agrega analizadores propios abajo."
-                )
-                analizador_seleccionado_por_concepto.extend(seleccion)
-                analizadores_del_concepto = [
-                    parse_analizador_display(item) for item in seleccion
-                ]
+                    analizadores_propios_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                    total_propios_guardados = len(analizadores_propios_guardados)
+                    cupo_sugeridos = max(0, 3 - total_propios_guardados)
+                    seleccion_actual = st.session_state.get(key, [])
+                    if len(seleccion_actual) > cupo_sugeridos:
+                        st.session_state[key] = seleccion_actual[:cupo_sugeridos]
+                        seleccion_actual = st.session_state[key]
+                        st.warning(
+                            f"Solo se permiten 3 analizadores por tipo de equipo. Ya tienes {total_propios_guardados} propios guardados, por eso solo puedes elegir {cupo_sugeridos} sugeridos para '{concepto}'."
+                        )
 
-                if opciones_sugeridas:
-                    pass
-                else:
-                    st.warning(f"No se encontraron analizadores recomendados para '{concepto}'.")
+                    col_resumen_1, col_resumen_2 = st.columns(2)
+                    col_resumen_1.metric("Máximo permitido", "3")
+                    col_resumen_2.metric("Propios guardados", str(total_propios_guardados))
 
-                usar_propios = st.checkbox(
-                    f"Agregar analizadores propios para {concepto}",
-                    key=key_propios_flag,
-                    value=False
-                )
+                    st.markdown("**Analizadores sugeridos**")
+                    st.caption("Selecciona solo los que realmente usarás. Si borras analizadores propios guardados, aquí volverás a tener cupo disponible automáticamente.")
+                    seleccion = []
+                    if cupo_sugeridos > 0 and opciones_sugeridas:
+                        for indice in range(cupo_sugeridos):
+                            clave_slot = f"{key}_slot_{indice}"
+                            valor_actual = seleccion_actual[indice] if indice < len(seleccion_actual) else ""
+                            opciones_slot = [""] + [
+                                opcion for opcion in opciones_sugeridas
+                                if opcion not in seleccion or opcion == valor_actual
+                            ]
+                            if valor_actual not in opciones_slot:
+                                valor_actual = ""
 
-                analizadores_propios = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
-                if usar_propios:
-                    datos_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
-                    if datos_guardados:
-                        datos_normalizados = []
-                        for item in datos_guardados:
-                            datos_normalizados.append({
-                                "tipo": item.get("tipo", item.get("Analizador", "")),
-                                "marca": item.get("marca", ""),
-                                "modelo": item.get("modelo", ""),
-                                "serie": item.get("serie", "")
-                            })
-                        df_propios_inicial = pd.DataFrame(datos_normalizados)
+                            seleccion_slot = st.selectbox(
+                                label=f"Analizador sugerido {indice + 1} para {concepto}",
+                                options=opciones_slot,
+                                index=opciones_slot.index(valor_actual) if valor_actual in opciones_slot else 0,
+                                key=clave_slot,
+                                help="Selecciona un analizador sugerido o deja el campo vacío si no lo necesitas."
+                            )
+                            if seleccion_slot:
+                                seleccion.append(seleccion_slot)
+                    elif cupo_sugeridos == 0:
+                        st.info("Ya alcanzaste el máximo de 3 analizadores con los registros propios guardados.")
+
+                    st.session_state[key] = seleccion
+                    analizador_seleccionado_por_concepto.extend(seleccion)
+                    analizadores_del_concepto = [
+                        parse_analizador_display(item) for item in seleccion
+                    ]
+
+                    if not opciones_sugeridas:
+                        st.info(f"No se encontraron analizadores sugeridos para '{concepto}'. Puedes capturar analizadores propios si lo necesitas.")
+
+                    st.markdown("**Analizadores propios**")
+                    usar_propios = st.checkbox(
+                        f"Agregar analizadores propios para {concepto}",
+                        key=key_propios_flag,
+                        value=False,
+                        help="Úsalo cuando el analizador no aparezca en las sugerencias o necesites registrar uno específico."
+                    )
+
+                    analizadores_propios = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                    if usar_propios:
+                        cupo_propios = max(0, 3 - len(seleccion))
+                        if cupo_propios == 0:
+                            st.error(
+                                f"No puedes agregar analizadores propios para '{concepto}' porque ya seleccionaste 3 analizadores en total (BEL + propios)."
+                            )
+                            st.session_state["analizadores_propios_por_concepto"][concepto] = []
+                            analizadores_propios = []
+                            analizadores_por_concepto[concepto] = analizadores_del_concepto
+                            continue
+
+                        datos_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                        if datos_guardados:
+                            datos_normalizados = []
+                            for item in datos_guardados:
+                                datos_normalizados.append({
+                                    "tipo": item.get("tipo", item.get("Analizador", "")),
+                                    "marca": item.get("marca", ""),
+                                    "modelo": item.get("modelo", ""),
+                                    "serie": item.get("serie", "")
+                                })
+                            df_propios_inicial = pd.DataFrame(datos_normalizados)
+                        else:
+                            df_propios_inicial = pd.DataFrame([
+                                {"tipo": "", "marca": "", "modelo": "", "serie": ""}
+                            ])
+
+                        if len(df_propios_inicial.dropna(how="all")) > cupo_propios:
+                            df_propios_inicial = df_propios_inicial.head(cupo_propios)
+
+                        with st.form(key=f"form_{key_propios_editor}", clear_on_submit=False):
+                            st.caption(
+                                f"Completa hasta {cupo_propios} analizador(es) propio(s). Guarda los cambios antes de generar el paquete."
+                            )
+                            df_propios = st.data_editor(
+                                df_propios_inicial,
+                                key=key_propios_editor,
+                                use_container_width=True,
+                                hide_index=True,
+                                num_rows="dynamic",
+                                column_config={
+                                    "tipo": "Tipo de Analizador",
+                                    "marca": "Marca",
+                                    "modelo": "Modelo",
+                                    "serie": "Numero de serie"
+                                }
+                            )
+                            guardar_propios = st.form_submit_button(
+                                "Guardar analizadores propios",
+                                use_container_width=True
+                            )
+
+                        if guardar_propios:
+                            nuevos_analizadores_propios = []
+                            for _, fila in df_propios.fillna("").iterrows():
+                                tipo = str(fila.get("tipo", "")).strip()
+                                marca = str(fila.get("marca", "")).strip()
+                                modelo = str(fila.get("modelo", "")).strip()
+                                serie = str(fila.get("serie", "")).strip()
+
+                                if not any([tipo, marca, modelo, serie]):
+                                    continue
+
+                                nuevos_analizadores_propios.append({
+                                    "tipo": tipo,
+                                    "marca": marca,
+                                    "modelo": modelo,
+                                    "serie": serie
+                                })
+
+                            if len(nuevos_analizadores_propios) > cupo_propios:
+                                nuevos_analizadores_propios = nuevos_analizadores_propios[:cupo_propios]
+                                st.error(
+                                    f"Solo puedes usar 3 analizadores por tipo de equipo. Ya seleccionaste {len(seleccion)} de BEL, así que únicamente puedes guardar {cupo_propios} propio(s) para '{concepto}'."
+                                )
+                            else:
+                                st.success("Información guardada correctamente.")
+
+                            st.session_state["analizadores_propios_por_concepto"][concepto] = nuevos_analizadores_propios
+                            analizadores_propios = nuevos_analizadores_propios
                     else:
-                        df_propios_inicial = pd.DataFrame([
-                            {"tipo": "", "marca": "", "modelo": "", "serie": ""}
-                        ])
+                        st.session_state["analizadores_propios_por_concepto"][concepto] = []
+                        analizadores_propios = []
 
-                    with st.form(key=f"form_{key_propios_editor}", clear_on_submit=False):
-                        st.caption("Edita los analizadores propios y presiona Guardar para conservar cambios.")
-                        df_propios = st.data_editor(
-                            df_propios_inicial,
-                            key=key_propios_editor,
-                            use_container_width=True,
-                            hide_index=True,
-                            num_rows="dynamic",
-                            column_config={
-                                "tipo": "Tipo de Analizador",
-                                "marca": "Marca",
-                                "modelo": "Modelo",
-                                "serie": "Numero de serie"
-                            }
+                    if analizadores_propios:
+                        st.caption(f"Analizadores propios registrados: {len(analizadores_propios)}")
+
+                    st.markdown("**Fecha manual de mantenimiento para este tipo de equipo**")
+                    key_fecha_manual = f"usar_fecha_manual_{clave_concepto}"
+                    key_fecha = f"fecha_manual_{clave_concepto}"
+                    usar_fecha_manual_concepto = st.checkbox(
+                        f"Usar fecha manual para {concepto}",
+                        key=key_fecha_manual,
+                        value=concepto in st.session_state["fecha_mantenimiento_por_concepto"],
+                        help="Si no se marca, las etiquetas de este tipo de equipo usarán la fecha actual."
+                    )
+
+                    if usar_fecha_manual_concepto:
+                        fecha_guardada = st.session_state["fecha_mantenimiento_por_concepto"].get(concepto, datetime.now().date())
+                        fecha_manual_concepto = st.date_input(
+                            f"Fecha de mantenimiento para {concepto}",
+                            value=fecha_guardada,
+                            key=key_fecha,
+                            help="Esta fecha se aplicará a las etiquetas de este tipo de equipo."
                         )
-                        guardar_propios = st.form_submit_button(
-                            "Guardar analizadores propios",
-                            use_container_width=True
-                        )
+                        st.session_state["fecha_mantenimiento_por_concepto"][concepto] = fecha_manual_concepto
+                    else:
+                        st.session_state["fecha_mantenimiento_por_concepto"].pop(concepto, None)
 
-                    if guardar_propios:
-                        nuevos_analizadores_propios = []
-                        for _, fila in df_propios.fillna("").iterrows():
-                            tipo = str(fila.get("tipo", "")).strip()
-                            marca = str(fila.get("marca", "")).strip()
-                            modelo = str(fila.get("modelo", "")).strip()
-                            serie = str(fila.get("serie", "")).strip()
-
-                            if not any([tipo, marca, modelo, serie]):
-                                continue
-
-                            nuevos_analizadores_propios.append({
-                                "tipo": tipo,
-                                "marca": marca,
-                                "modelo": modelo,
-                                "serie": serie
-                            })
-
-                        st.session_state["analizadores_propios_por_concepto"][concepto] = nuevos_analizadores_propios
-                        analizadores_propios = nuevos_analizadores_propios
-                else:
-                    st.session_state["analizadores_propios_por_concepto"][concepto] = []
-                    analizadores_propios = []
-
-                analizadores_por_concepto[concepto] = analizadores_del_concepto + analizadores_propios
+                    analizadores_por_concepto[concepto] = analizadores_del_concepto + analizadores_propios
 
         st.session_state["analizadores_seleccionados"] = list(
             dict.fromkeys(analizador_seleccionado_por_concepto))
         st.session_state["analizadores_por_concepto"] = analizadores_por_concepto
 
         # ── Nombre del paquete ────────────────────────────────────────────────
+        st.markdown("### 3. Configura la salida")
         nombre_carpeta = st.text_input(
             "Nombre del paquete",
             value=f"reporte_{datetime.now():%Y%m%d_%H%M%S}",
-            help="Nombre del archivo ZIP que se descargará."
+            help="Este será el nombre del archivo ZIP que se descargará."
         ).strip()
         if not nombre_carpeta:
             nombre_carpeta = f"reporte_{datetime.now():%Y%m%d_%H%M%S}"
@@ -278,25 +371,11 @@ if st.session_state.clic_buscar:
         # ── Generar ───────────────────────────────────────────────────────────
         col_boton, col_hojas, col_etiquetas = st.columns([4, 3, 3])
         with col_boton:
-            generar = st.button("Generar archivo", type="primary", use_container_width=True)
+            generar = st.button("Generar paquete", type="primary", use_container_width=True)
         with col_hojas:
             hacer_hojas = st.checkbox("Hojas de verificación", value=True)
         with col_etiquetas:
             hacer_etiquetas = st.checkbox("Etiquetas", value=True)
-
-        ingresar_fecha_mantenimiento_manual = st.checkbox(
-            "Ingresar fecha de mantenimiento manual",
-            value=False,
-            help="Si no se marca, se usará la fecha actual."
-        )
-
-        fecha_mantenimiento_base = None
-        if ingresar_fecha_mantenimiento_manual:
-            fecha_mantenimiento_base = st.date_input(
-                "Fecha de mantenimiento",
-                value=datetime.now().date(),
-                help="Selecciona la fecha base para las etiquetas."
-            )
 
         if generar:
             if not hacer_hojas and not hacer_etiquetas:
@@ -317,7 +396,7 @@ if st.session_state.clic_buscar:
                     hacer_etiquetas            = hacer_etiquetas,
                     analizadores_por_concepto  = st.session_state.get("analizadores_por_concepto", {}),
                     analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", []),
-                    fecha_mantenimiento_base   = fecha_mantenimiento_base
+                    fecha_mantenimiento_base   = st.session_state.get("fecha_mantenimiento_por_concepto", {})
                 )
 
                 if exitos > 0 or hacer_etiquetas:
@@ -334,4 +413,4 @@ if st.session_state.clic_buscar:
                         for err in errores:
                             st.warning(err)
     else:
-        st.info("Seleccione los equipos que desea trabajar")
+        st.info("Selecciona uno o varios equipos de la tabla para continuar.")
