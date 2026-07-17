@@ -4,6 +4,10 @@ import pandas as pd
 from datetime import datetime
 
 from utils.gestor_plantillas import crear_paquete_reporte
+from utils.google_drive import (
+    formatear_nombre_carpeta_documentacion,
+    resolver_fecha_referencia_drive,
+)
 from utils.lector_analizadores import (
     cargar_analizadores,
     buscar_analizadores_por_concepto,
@@ -32,6 +36,18 @@ def inicializar_estado():
         st.session_state.analizadores_propios_por_concepto = {}
     if "fecha_mantenimiento_por_concepto" not in st.session_state:
         st.session_state.fecha_mantenimiento_por_concepto = {}
+    if "ultimo_paquete_zip_bytes" not in st.session_state:
+        st.session_state.ultimo_paquete_zip_bytes = b""
+    if "ultimo_paquete_zip_nombre" not in st.session_state:
+        st.session_state.ultimo_paquete_zip_nombre = ""
+    if "ultimo_paquete_drive_folder" not in st.session_state:
+        st.session_state.ultimo_paquete_drive_folder = ""
+    if "ultimo_paquete_periodo" not in st.session_state:
+        st.session_state.ultimo_paquete_periodo = ""
+    if "ultimo_paquete_periodo_mixto" not in st.session_state:
+        st.session_state.ultimo_paquete_periodo_mixto = False
+    if "ultimo_paquete_generado_en" not in st.session_state:
+        st.session_state.ultimo_paquete_generado_en = ""
     for key in ("filtro_concepto", "filtro_marca", "filtro_activo", "filtro_ubicacion"):
         if key not in st.session_state:
             st.session_state[key] = []
@@ -170,9 +186,11 @@ if st.session_state.clic_buscar:
 
         if analizadores_df is not None:
             st.markdown("### Selección de analizadores por tipo de equipo")
+            opciones_bel = list(dict.fromkeys(obtener_analizadores_display(analizadores_df)))
             for concepto in conceptos_seleccionados:
                 sugeridos = buscar_analizadores_por_concepto(analizadores_df, [concepto])
                 opciones_sugeridas = list(dict.fromkeys(obtener_analizadores_display(sugeridos)))
+                opciones_disponibles_bel = list(dict.fromkeys(opciones_sugeridas + opciones_bel))
                 clave_concepto = re.sub(r"\W+", "_", concepto.strip().lower()).strip("_")
                 key = f"analizadores_{clave_concepto}"
                 key_propios_flag = f"usar_analizadores_propios_{clave_concepto}"
@@ -198,28 +216,36 @@ if st.session_state.clic_buscar:
                     col_resumen_1.metric("Máximo permitido", "3")
                     col_resumen_2.metric("Propios guardados", str(total_propios_guardados))
 
-                    st.markdown("**Analizadores sugeridos**")
-                    st.caption("Selecciona solo los que realmente usarás. Si borras analizadores propios guardados, aquí volverás a tener cupo disponible automáticamente.")
+                    st.markdown("**Analizadores BEL disponibles**")
+                    if opciones_sugeridas and opciones_sugeridas != opciones_bel:
+                        st.caption("Las opciones sugeridas para este equipo aparecen primero, pero puedes escoger cualquier analizador BEL. Si borras analizadores propios guardados, aquí volverás a tener cupo disponible automáticamente.")
+                    else:
+                        st.caption("Puedes escoger cualquier analizador BEL. Si borras analizadores propios guardados, aquí volverás a tener cupo disponible automáticamente.")
+
                     seleccion = []
-                    if cupo_sugeridos > 0 and opciones_sugeridas:
+                    if cupo_sugeridos > 0 and opciones_disponibles_bel:
                         for indice in range(cupo_sugeridos):
                             clave_slot = f"{key}_slot_{indice}"
                             valor_actual = seleccion_actual[indice] if indice < len(seleccion_actual) else ""
+                            valor_widget = st.session_state.get(clave_slot, valor_actual)
+                            if valor_widget in opciones_disponibles_bel and valor_widget not in seleccion:
+                                seleccion.append(valor_widget)
+
                             opciones_slot = [""] + [
-                                opcion for opcion in opciones_sugeridas
-                                if opcion not in seleccion or opcion == valor_actual
+                                opcion for opcion in opciones_disponibles_bel
+                                if opcion not in seleccion or opcion == valor_widget
                             ]
-                            if valor_actual not in opciones_slot:
-                                valor_actual = ""
+                            if valor_widget not in opciones_slot:
+                                valor_widget = ""
 
                             seleccion_slot = st.selectbox(
-                                label=f"Analizador sugerido {indice + 1} para {concepto}",
+                                label=f"Analizador BEL {indice + 1} para {concepto}",
                                 options=opciones_slot,
-                                index=opciones_slot.index(valor_actual) if valor_actual in opciones_slot else 0,
+                                index=opciones_slot.index(valor_widget) if valor_widget in opciones_slot else 0,
                                 key=clave_slot,
-                                help="Selecciona un analizador sugerido o deja el campo vacío si no lo necesitas."
+                                help="Selecciona un analizador BEL o deja el campo vacío si no lo necesitas."
                             )
-                            if seleccion_slot:
+                            if seleccion_slot and seleccion_slot not in seleccion:
                                 seleccion.append(seleccion_slot)
                     elif cupo_sugeridos == 0:
                         st.info("Ya alcanzaste el máximo de 3 analizadores con los registros propios guardados.")
@@ -231,7 +257,7 @@ if st.session_state.clic_buscar:
                     ]
 
                     if not opciones_sugeridas:
-                        st.info(f"No se encontraron analizadores sugeridos para '{concepto}'. Puedes capturar analizadores propios si lo necesitas.")
+                        st.info(f"No se encontraron sugerencias específicas para '{concepto}', pero puedes elegir cualquier analizador BEL o capturar uno propio si lo necesitas.")
 
                     st.markdown("**Analizadores propios**")
                     usar_propios = st.checkbox(
@@ -400,12 +426,31 @@ if st.session_state.clic_buscar:
                 )
 
                 if exitos > 0 or hacer_etiquetas:
+                    fecha_referencia_drive, periodo_mixto_drive = resolver_fecha_referencia_drive(
+                        st.session_state.get("fecha_mantenimiento_por_concepto", {}),
+                        datetime.now().date()
+                    )
+                    contenido_zip = buffer_zip.getvalue()
+                    st.session_state.ultimo_paquete_zip_bytes = contenido_zip
+                    st.session_state.ultimo_paquete_zip_nombre = f"{nombre_carpeta}.zip"
+                    st.session_state.ultimo_paquete_drive_folder = formatear_nombre_carpeta_documentacion(
+                        fecha_referencia_drive
+                    )
+                    st.session_state.ultimo_paquete_periodo = fecha_referencia_drive.isoformat()
+                    st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto_drive
+                    st.session_state.ultimo_paquete_generado_en = datetime.now().isoformat()
+
                     st.download_button(
                         label               = "⬇️ Descargar Paquete (.zip)",
-                        data                = buffer_zip,
+                        data                = contenido_zip,
                         file_name           = f"{nombre_carpeta}.zip",
                         mime                = "application/zip",
                         use_container_width = True
+                    )
+                    st.page_link(
+                        "pages/4_Google Drive.py",
+                        label="Guardar también en Google Drive",
+                        use_container_width=True
                     )
 
                 if errores:

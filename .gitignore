@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 venv/
 .env
+datos/google_oauth_client.json
+datos/google_drive_credentials.json
