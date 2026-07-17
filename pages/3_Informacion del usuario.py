@@ -67,3 +67,4 @@ if st.session_state.nombre_ingeniero or st.session_state.nombre_jefe or st.sessi
             st.warning("⚠️ La información se guardó, pero aún faltan el nombre del ingeniero o el hospital para generar hojas o etiquetas.")
 else:
     st.warning("⚠️ Aún no has guardado tu información. Completa este formulario antes de generar hojas o etiquetas.")
+    ###
