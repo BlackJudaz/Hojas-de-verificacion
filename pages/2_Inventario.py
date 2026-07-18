@@ -5,6 +5,25 @@ from utils.lector_inventario import (
     aplicar_programacion_tinc,
 )
 
+
+def _resetear_estado_inventario():
+    """Limpia estado dependiente del inventario para evitar inconsistencias al recargar."""
+    st.session_state.inventario_df = None
+    # Estas claves se limpian en el bloque inventario_df is None para evitar
+    # errores de Streamlit al modificar estado ligado a widgets ya renderizados.
+
+    # Estados usados por la página de hojas que dependen del inventario actual.
+    st.session_state.clic_buscar = False
+    st.session_state.filtro_concepto = []
+    st.session_state.filtro_marca = []
+    st.session_state.filtro_activo = []
+    st.session_state.filtro_ubicacion = []
+    st.session_state.analizadores_seleccionados = []
+    st.session_state.analizadores_por_concepto = {}
+    st.session_state.analizadores_propios_por_concepto = {}
+    st.session_state.periodicidad_por_concepto = {}
+    st.session_state.fecha_mantenimiento_por_concepto = {}
+
 if "programacion_tinc_texto" not in st.session_state:
     st.session_state.programacion_tinc_texto = ""
 if "programacion_tinc_df" not in st.session_state:
@@ -17,6 +36,10 @@ st.caption("Carga tu inventario, pega la programación mensual y verifica qué e
 st.divider()
 
 if st.session_state.inventario_df is None:
+    st.session_state.programacion_tinc_texto = ""
+    st.session_state.programacion_tinc_df = None
+    st.session_state.programacion_tinc_html = ""
+
     archivo = st.file_uploader(
         label="Sube tu archivo Excel de inventario",
         type=["xlsx"]
@@ -100,24 +123,24 @@ else:
     if inventario_verificacion.empty:
         st.info("Aún no hay equipos con folio TiNC emparejado.")
     else:
+        column_config = {}
+        if "URL TINC" in columnas_verificacion:
+            column_config["URL TINC"] = st.column_config.LinkColumn(
+                "Liga TiNC",
+                display_text="Abrir enlace"
+            )
+
         st.dataframe(
             inventario_verificacion[columnas_verificacion].head(50),
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "URL TINC": st.column_config.LinkColumn(
-                    "Liga TiNC",
-                    display_text="Abrir enlace"
-                )
-            }
+            column_config=column_config
         )
 
         if len(inventario_verificacion) > 50:
             st.caption(f"Se muestran los primeros 50 registros emparejados de un total de {len(inventario_verificacion)}.")
 
     if st.button("Eliminar e Importar otro inventario"):
-        st.session_state.inventario_df = None
-        st.session_state.programacion_tinc_texto = ""
-        st.session_state.programacion_tinc_df = None
-        st.session_state.programacion_tinc_html = ""
+        _resetear_estado_inventario()
+        st.success("Inventario eliminado. Ya puedes importar otro archivo.")
         st.rerun()

@@ -1,13 +1,18 @@
 import json
+import mimetypes
 import os
+import socket
+import time
 from datetime import date, datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import zipfile
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _OAUTH_CLIENT_CONFIG_PATH = _BASE_DIR / "datos" / "google_oauth_client.json"
+_OAUTH_TOKEN_PATH = _BASE_DIR / "datos" / "google_drive_token.json"
 
 _MESES = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -69,6 +74,12 @@ def formatear_nombre_carpeta_documentacion(fecha_mantenimiento):
     return f"Documentación MP {mes} {fecha_normalizada.year}"
 
 
+def construir_ruta_documentacion(fecha_mantenimiento=None):
+    fecha_normalizada = _normalizar_fecha(fecha_mantenimiento, datetime.now().date())
+    mes = _MESES[fecha_normalizada.month - 1]
+    return ["Documentación MP", str(fecha_normalizada.year), mes]
+
+
 def cargar_client_config(desde_json):
     client_config = json.loads(desde_json)
     if not isinstance(client_config, dict) or not any(k in client_config for k in ("installed", "web")):
@@ -105,24 +116,25 @@ def autorizar_google_drive(client_config):
     credentials = flow.run_local_server(
         port=0,
         open_browser=True,
-        prompt="select_account consent",
         authorization_prompt_message="Abre este enlace para autorizar la conexión con Google Drive: {url}",
-        success_message="La conexión con Google Drive fue autorizada. Puedes volver a la aplicación."
+        success_message="Autorización completada. Puedes cerrar esta pestaña y volver a la aplicación."
     )
     return json.loads(credentials.to_json())
-
 
 def construir_servicio_drive(credentials_info):
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
+    from google_auth_httplib2 import AuthorizedHttp
+    import httplib2
 
     credentials = Credentials.from_authorized_user_info(credentials_info, SCOPES)
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
         credentials_info = json.loads(credentials.to_json())
 
-    service = build("drive", "v3", credentials=credentials)
+    http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=180))
+    service = build("drive", "v3", http=http, cache_discovery=False)
     return service, credentials_info
 
 
@@ -134,62 +146,120 @@ def obtener_usuario_conectado(service):
         return {}
 
 
-def _escape_drive_query(texto):
-    return str(texto).replace("'", "\\'")
+def _es_error_temporal_drive(exc):
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10060:
+        return True
+
+    texto = str(exc).lower()
+    return any(patron in texto for patron in ["10060", "timed out", "timeout", "connection reset", "connection aborted"])
 
 
-def _construir_nombre_versionado(nombre_base, indice):
-    if indice == 0:
-        return nombre_base
+def _ejecutar_con_reintentos(request, intentos=4):
+    ultimo_error = None
+    for intento in range(intentos):
+        try:
+            return request.execute(num_retries=2)
+        except Exception as exc:
+            ultimo_error = exc
+            if not _es_error_temporal_drive(exc) or intento == intentos - 1:
+                raise
+            time.sleep(2 + intento * 2)
 
-    raiz, extension = os.path.splitext(nombre_base)
-    if extension:
-        return f"{raiz} ({indice}){extension}"
-    return f"{nombre_base} ({indice})"
+    raise ultimo_error
 
 
-def obtener_nombre_disponible(service, nombre_base, mime_type=None, parent_id=None):
-    indice = 0
+def _escapar_valor_query_drive(valor):
+    return str(valor).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _buscar_archivos_en_carpeta(service, parent_id, nombre, mime_type=None):
+    filtros = [
+        "trashed = false",
+        f"name = '{_escapar_valor_query_drive(nombre)}'",
+        f"'{_escapar_valor_query_drive(parent_id)}' in parents",
+    ]
+    if mime_type:
+        filtros.append(f"mimeType = '{_escapar_valor_query_drive(mime_type)}'")
+
+    consulta = " and ".join(filtros)
+    respuesta = _ejecutar_con_reintentos(service.files().list(
+        q=consulta,
+        spaces="drive",
+        fields="files(id, name, mimeType, webViewLink)",
+        pageSize=100
+    ))
+    return respuesta.get("files", [])
+
+
+def obtener_o_crear_carpeta(service, nombre, parent_id=None):
+    if parent_id:
+        existentes = _buscar_archivos_en_carpeta(
+            service,
+            parent_id,
+            nombre,
+            mime_type="application/vnd.google-apps.folder"
+        )
+        if existentes:
+            return existentes[0]
+
+    metadata = {
+        "name": nombre,
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if parent_id:
+        metadata["parents"] = [parent_id]
+
+    return _ejecutar_con_reintentos(service.files().create(body=metadata, fields="id, name, webViewLink"))
+
+
+def obtener_o_crear_ruta_carpetas(service, nombres_carpeta, parent_id=None):
+    carpetas = []
+    carpeta_padre = parent_id
+    for nombre in nombres_carpeta:
+        carpeta = obtener_o_crear_carpeta(service, nombre, parent_id=carpeta_padre)
+        carpetas.append(carpeta)
+        carpeta_padre = carpeta["id"]
+    return carpetas
+
+
+def _separar_nombre_extension(nombre_archivo):
+    base, extension = os.path.splitext(nombre_archivo)
+    return base, extension
+
+
+def resolver_nombre_unico_drive(service, nombre_archivo, folder_id):
+    if not _buscar_archivos_en_carpeta(service, folder_id, nombre_archivo):
+        return nombre_archivo
+
+    base, extension = _separar_nombre_extension(nombre_archivo)
+    indice = 1
     while True:
-        candidato = _construir_nombre_versionado(nombre_base, indice)
-        filtros = [
-            f"name = '{_escape_drive_query(candidato)}'",
-            "trashed = false"
-        ]
-        if mime_type:
-            filtros.append(f"mimeType = '{mime_type}'")
-        if parent_id:
-            filtros.append(f"'{_escape_drive_query(parent_id)}' in parents")
-
-        resultado = service.files().list(
-            q=" and ".join(filtros),
-            fields="files(id, name)",
-            pageSize=1,
-            supportsAllDrives=False
-        ).execute()
-        if not resultado.get("files"):
+        candidato = f"{base}({indice}){extension}"
+        if not _buscar_archivos_en_carpeta(service, folder_id, candidato):
             return candidato
         indice += 1
 
 
 def crear_carpeta_unica(service, nombre_base, parent_id=None):
-    mime_type = "application/vnd.google-apps.folder"
-    nombre_final = obtener_nombre_disponible(service, nombre_base, mime_type=mime_type, parent_id=parent_id)
     metadata = {
-        "name": nombre_final,
-        "mimeType": mime_type,
+        "name": nombre_base,
+        "mimeType": "application/vnd.google-apps.folder",
     }
     if parent_id:
         metadata["parents"] = [parent_id]
 
-    carpeta = service.files().create(body=metadata, fields="id, name").execute()
-    return carpeta
+    return _ejecutar_con_reintentos(service.files().create(body=metadata, fields="id, name, webViewLink"))
 
 
-def subir_archivo_bytes(service, nombre_archivo, contenido, folder_id=None, mime_type="application/zip"):
+def subir_archivo_bytes(service, nombre_archivo, contenido, folder_id=None, mime_type="application/zip", usar_nombre_unico=True):
     from googleapiclient.http import MediaIoBaseUpload
 
-    nombre_final = obtener_nombre_disponible(service, nombre_archivo, mime_type=mime_type, parent_id=folder_id)
+    nombre_final = nombre_archivo
+    if folder_id and usar_nombre_unico:
+        nombre_final = resolver_nombre_unico_drive(service, nombre_archivo, folder_id)
+
     metadata = {
         "name": nombre_final,
     }
@@ -197,9 +267,79 @@ def subir_archivo_bytes(service, nombre_archivo, contenido, folder_id=None, mime
         metadata["parents"] = [folder_id]
 
     media = MediaIoBaseUpload(BytesIO(contenido), mimetype=mime_type, resumable=False)
-    archivo = service.files().create(
+    archivo = _ejecutar_con_reintentos(service.files().create(
         body=metadata,
         media_body=media,
         fields="id, name, webViewLink"
-    ).execute()
+    ))
     return archivo
+
+
+def _iterar_entradas_zip_validas(contenido_zip):
+    with zipfile.ZipFile(BytesIO(contenido_zip), "r") as archivo_zip:
+        info_list = [info for info in archivo_zip.infolist() if info.filename and not info.filename.startswith("__MACOSX/")]
+        rutas_validas = []
+        for info in info_list:
+            ruta = PurePosixPath(info.filename)
+            partes = [parte for parte in ruta.parts if parte not in ("", ".")]
+            if not partes or any(parte == ".." for parte in partes):
+                continue
+            rutas_validas.append((info, partes))
+
+        prefijo_comun = None
+        if rutas_validas:
+            primeras_partes = {partes[0] for _, partes in rutas_validas if partes}
+            if len(primeras_partes) == 1:
+                prefijo_comun = next(iter(primeras_partes))
+
+        for info, partes in rutas_validas:
+            if prefijo_comun and partes and partes[0] == prefijo_comun:
+                partes = partes[1:]
+            if not partes:
+                continue
+            yield archivo_zip, info, partes
+
+
+def subir_zip_como_documentos(service, contenido_zip, folder_id):
+    carpetas_cache = {(): folder_id}
+    archivos_subidos = []
+
+    for archivo_zip, info, partes in _iterar_entradas_zip_validas(contenido_zip):
+        if info.is_dir():
+            carpeta_actual = folder_id
+            ruta_acumulada = []
+            for parte in partes:
+                ruta_acumulada.append(parte)
+                clave = tuple(ruta_acumulada)
+                if clave in carpetas_cache:
+                    carpeta_actual = carpetas_cache[clave]
+                    continue
+                carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
+                carpeta_actual = carpeta["id"]
+                carpetas_cache[clave] = carpeta_actual
+            continue
+
+        carpeta_actual = folder_id
+        ruta_acumulada = []
+        for parte in partes[:-1]:
+            ruta_acumulada.append(parte)
+            clave = tuple(ruta_acumulada)
+            if clave not in carpetas_cache:
+                carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
+                carpetas_cache[clave] = carpeta["id"]
+            carpeta_actual = carpetas_cache[clave]
+
+        nombre_archivo = partes[-1]
+        mime_type = mimetypes.guess_type(nombre_archivo)[0] or "application/octet-stream"
+        contenido = archivo_zip.read(info.filename)
+        archivo = subir_archivo_bytes(
+            service,
+            nombre_archivo,
+            contenido,
+            folder_id=carpeta_actual,
+            mime_type=mime_type,
+            usar_nombre_unico=True
+        )
+        archivos_subidos.append(archivo)
+
+    return archivos_subidos

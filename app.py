@@ -17,6 +17,10 @@ if "google_drive_credentials" not in st.session_state:
     st.session_state.google_drive_credentials = None
 if "google_drive_usuario" not in st.session_state:
     st.session_state.google_drive_usuario = {}
+if "google_drive_restaure_intentado" not in st.session_state:
+    st.session_state.google_drive_restaure_intentado = False
+if "google_drive_restaure_mensaje" not in st.session_state:
+    st.session_state.google_drive_restaure_mensaje = ""
 if "ultimo_paquete_zip_bytes" not in st.session_state:
     st.session_state.ultimo_paquete_zip_bytes = b""
 if "ultimo_paquete_zip_nombre" not in st.session_state:

@@ -16,7 +16,6 @@ def _formatear_periodo(periodo_iso):
 
     return google_drive.formatear_nombre_carpeta_documentacion(fecha).replace("Documentación MP ", "")
 
-
 def _formatear_fecha_hora(valor_iso):
     if not valor_iso:
         return "No disponible"
@@ -25,6 +24,16 @@ def _formatear_fecha_hora(valor_iso):
         return datetime.fromisoformat(valor_iso).strftime("%d/%m/%Y %H:%M:%S")
     except ValueError:
         return "No disponible"
+
+
+def _resolver_fecha_periodo(periodo_iso):
+    if not periodo_iso:
+        return datetime.now().date()
+
+    try:
+        return datetime.fromisoformat(periodo_iso).date()
+    except ValueError:
+        return datetime.now().date()
 
 
 def _tamano_legible(contenido):
@@ -37,12 +46,16 @@ def _tamano_legible(contenido):
 
 
 st.title("☁️ Google Drive")
-st.info("Conecta tu cuenta de Google Drive para guardar también el último paquete ZIP generado por la aplicación.")
+st.info("Conecta tu cuenta de Google Drive para guardar el contenido del paquete como documentos separados, sin descargar nada localmente.")
 st.divider()
 
 if not hasattr(google_drive, "cargar_client_config_local") or not hasattr(google_drive, "obtener_ruta_client_config_drive"):
     st.error("La integración de Google Drive no terminó de cargarse correctamente. Reinicia la app para volver a intentarlo.")
     st.stop()
+
+mensaje_flash = st.session_state.pop("google_drive_flash_ok", "")
+if mensaje_flash:
+    st.success(mensaje_flash)
 
 contenido_zip = st.session_state.get("ultimo_paquete_zip_bytes", b"")
 nombre_zip = st.session_state.get("ultimo_paquete_zip_nombre", "")
@@ -50,6 +63,8 @@ periodo_iso = st.session_state.get("ultimo_paquete_periodo", "")
 nombre_carpeta_sugerido = st.session_state.get("ultimo_paquete_drive_folder", "")
 periodo_mixto = st.session_state.get("ultimo_paquete_periodo_mixto", False)
 fecha_generacion = st.session_state.get("ultimo_paquete_generado_en", "")
+fecha_periodo = _resolver_fecha_periodo(periodo_iso)
+ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
 
 if not contenido_zip or not nombre_zip:
     st.warning("Aún no hay un paquete ZIP disponible para subir. Primero genera un paquete en la página de hojas de verificación.")
@@ -82,7 +97,7 @@ with st.container(border=True):
 
     config_disponible = client_config is not None
     if config_disponible:
-        st.success("La configuración OAuth local está lista. Cada usuario podrá iniciar sesión y elegir su cuenta en el navegador.")
+        st.success("Es posible iniciar sesión y elegir su cuenta en el navegador.")
     else:
         st.warning(
             f"Falta el archivo local de configuración OAuth en '{ruta_config_drive}'. Debe configurarse una sola vez para esta app; después, cada usuario solo tendrá que iniciar sesión en el navegador."
@@ -98,7 +113,8 @@ with st.container(border=True):
                     usuario_conectado = google_drive.obtener_usuario_conectado(service)
                 st.session_state.google_drive_credentials = credenciales_actualizadas
                 st.session_state.google_drive_usuario = usuario_conectado
-                st.success("Conexión con Google Drive completada para esta sesión.")
+                st.session_state.google_drive_flash_ok = "Conexión con Google Drive completada para esta sesión."
+                st.rerun()
             except Exception as exc:
                 st.error(f"No fue posible conectar con Google Drive: {exc}")
 
@@ -106,7 +122,8 @@ with st.container(border=True):
         if st.button("Desconectar esta sesión", use_container_width=True, disabled=not bool(credenciales_drive)):
             st.session_state.google_drive_credentials = None
             st.session_state.google_drive_usuario = {}
-            st.success("La cuenta de Google Drive se desconectó de esta sesión. Puedes conectar otra cuenta inmediatamente.")
+            st.session_state.google_drive_flash_ok = "La cuenta de Google Drive se desconectó de esta sesión. Puedes conectar otra cuenta inmediatamente."
+            st.rerun()
 
     if credenciales_drive:
         correo = usuario_drive.get("emailAddress", "")
@@ -119,31 +136,27 @@ with st.container(border=True):
         st.caption("Estado actual: sin conexión a Google Drive.")
 
 with st.container(border=True):
-    st.markdown("### 3. Guardar el ZIP en Drive")
-    carpeta_drive = st.text_input(
-        "Nombre de la carpeta en Drive",
-        value=nombre_carpeta_sugerido,
-        help="Si ya existe una carpeta con ese nombre, la app creará automáticamente una versión con sufijo como '(1)'."
-    ).strip()
-
-    if not carpeta_drive:
-        carpeta_drive = nombre_carpeta_sugerido
-
-    st.caption("Si dentro de la carpeta ya existe un ZIP con el mismo nombre, también se guardará con sufijo '(1)', '(2)', etc.")
+    st.markdown("### 3. Guardar en Drive")
+    st.write(f"Ruta destino: {' / '.join(ruta_drive_destino)}")
+    if nombre_carpeta_sugerido:
+        st.caption(f"Referencia anterior del paquete: {nombre_carpeta_sugerido}.")
+    st.caption("Si ya existen archivos con el mismo nombre dentro de la carpeta de destino, se guardarán como 'archivo(1)', 'archivo(2)', etc.")
 
     if st.button("Subir último paquete a Google Drive", use_container_width=True, disabled=not bool(credenciales_drive), type="primary"):
         try:
-            with st.spinner("Creando carpeta y subiendo archivo a Google Drive..."):
+            with st.spinner("Subiendo contenido a Google Drive..."):
                 service, credenciales_actualizadas = google_drive.construir_servicio_drive(credenciales_drive)
-                carpeta = google_drive.crear_carpeta_unica(service, carpeta_drive)
-                archivo = google_drive.subir_archivo_bytes(service, nombre_zip, contenido_zip, folder_id=carpeta["id"])
+                carpetas = google_drive.obtener_o_crear_ruta_carpetas(service, ruta_drive_destino)
+                carpeta_destino = carpetas[-1]
+                archivos = google_drive.subir_zip_como_documentos(service, contenido_zip, folder_id=carpeta_destino["id"])
+
                 st.session_state.google_drive_credentials = credenciales_actualizadas
                 st.session_state.google_drive_usuario = google_drive.obtener_usuario_conectado(service)
 
             st.success(
-                f"Archivo subido correctamente a Google Drive en la carpeta '{carpeta['name']}' como '{archivo['name']}'."
+                f"Se subieron {len(archivos)} documento(s) a Google Drive en la ruta {' / '.join(ruta_drive_destino)}."
             )
-            if archivo.get("webViewLink"):
-                st.link_button("Abrir archivo en Google Drive", archivo["webViewLink"], use_container_width=True)
+            if carpeta_destino.get("webViewLink"):
+                st.link_button("Abrir carpeta en Google Drive", carpeta_destino["webViewLink"], use_container_width=True)
         except Exception as exc:
             st.error(f"No se pudo subir el paquete a Google Drive: {exc}")
