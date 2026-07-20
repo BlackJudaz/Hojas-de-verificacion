@@ -116,6 +116,12 @@ with st.container(border=True):
                 st.session_state.google_drive_usuario = usuario_conectado
                 st.session_state.google_drive_flash_ok = "Conexión con Google Drive completada para esta sesión."
                 st.rerun()
+            except ModuleNotFoundError as exc:
+                modulo = str(getattr(exc, "name", "") or "dependencia requerida")
+                st.error(
+                    f"Falta instalar la dependencia '{modulo}' en este entorno de Python. "
+                    "Ejecuta: pip install -r requirements.txt"
+                )
             except Exception as exc:
                 st.error(f"No fue posible conectar con Google Drive: {exc}")
 
