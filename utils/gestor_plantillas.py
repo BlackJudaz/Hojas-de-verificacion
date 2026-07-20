@@ -364,9 +364,34 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 contenido = "\n".join(detalles)
                 zip_file.writestr(f"{nombre_carpeta}/analizador_seleccionado.txt", contenido)
 
-        if analizadores_seleccionados:
-            contenido = "\n".join(analizadores_seleccionados)
-            zip_file.writestr(f"{nombre_carpeta}/analizadores_utilizados.txt", contenido)
+        resumen_analizadores = []
+        if isinstance(analizadores_por_concepto, dict) and analizadores_por_concepto:
+            for concepto in sorted(analizadores_por_concepto.keys()):
+                resumen_analizadores.append(f"[{concepto}]")
+                items = analizadores_por_concepto.get(concepto) or []
+                if not items:
+                    resumen_analizadores.append("- Sin analizadores registrados")
+                    continue
+
+                for item in items:
+                    if isinstance(item, dict):
+                        tipo = str(item.get("tipo", item.get("Analizador", ""))).strip()
+                        marca = str(item.get("marca", "")).strip()
+                        modelo = str(item.get("modelo", "")).strip()
+                        serie = str(item.get("serie", "")).strip()
+                        detalle = " | ".join([v for v in [tipo, marca, modelo, serie] if v])
+                        resumen_analizadores.append(f"- {detalle or 'Analizador sin detalle'}")
+                    else:
+                        texto = str(item).strip()
+                        resumen_analizadores.append(f"- {texto or 'Analizador sin detalle'}")
+
+        if not resumen_analizadores:
+            if analizadores_seleccionados:
+                resumen_analizadores = [f"- {a}" for a in analizadores_seleccionados]
+            else:
+                resumen_analizadores = ["Sin analizadores registrados en este paquete."]
+
+        zip_file.writestr(f"{nombre_carpeta}/analizadores_utilizados.txt", "\n".join(resumen_analizadores))
 
         status_text.empty()
 
