@@ -49,7 +49,7 @@ st.title("☁️ Google Drive")
 st.info("Conecta tu cuenta de Google Drive para guardar el contenido del paquete como documentos separados, sin descargar nada localmente.")
 st.divider()
 
-if not hasattr(google_drive, "cargar_client_config_local") or not hasattr(google_drive, "obtener_ruta_client_config_drive"):
+if not hasattr(google_drive, "cargar_client_config_local") or not hasattr(google_drive, "resolver_client_config_drive"):
     st.error("La integración de Google Drive no terminó de cargarse correctamente. Reinicia la app para volver a intentarlo.")
     st.stop()
 
@@ -83,24 +83,25 @@ with st.container(border=True):
 
 with st.container(border=True):
     st.markdown("### 2. Conexión con Google Drive")
-    st.caption("Cada usuario conecta su propia cuenta desde el navegador. La sesión se usa solo mientras esa persona tenga abierta la app.")
+    st.caption("Cada usuario conecta su propia cuenta desde el navegador. La configuración OAuth puede venir desde entorno, secretos de Streamlit o, como respaldo, desde un archivo local.")
 
     credenciales_drive = st.session_state.get("google_drive_credentials")
     usuario_drive = st.session_state.get("google_drive_usuario", {})
-    ruta_config_drive = google_drive.obtener_ruta_client_config_drive()
     client_config = None
+    fuente_config_drive = "sin configurar"
 
     try:
-        client_config = google_drive.cargar_client_config_local()
+        client_config, fuente_config_drive = google_drive.resolver_client_config_drive()
     except Exception as exc:
-        st.error(f"La configuración Auth local no es válida: {exc}")
+        st.error(f"La configuración OAuth de Google Drive no es válida: {exc}")
 
     config_disponible = client_config is not None
     if config_disponible:
         st.success("Es posible iniciar sesión y elegir su cuenta en el navegador.")
+        st.caption(f"Fuente detectada: {fuente_config_drive}")
     else:
         st.warning(
-            f"Falta el archivo local de configuración OAuth en '{ruta_config_drive}'. Debe configurarse una sola vez para esta app; después, cada usuario solo tendrá que iniciar sesión en el navegador."
+            "No se encontró configuración OAuth. Define GOOGLE_OAUTH_CLIENT_JSON, GOOGLE_OAUTH_CLIENT_PATH o un secreto de Streamlit antes de conectar Google Drive."
         )
 
     col_conectar, col_desconectar = st.columns(2)

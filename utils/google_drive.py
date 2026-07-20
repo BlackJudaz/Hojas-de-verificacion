@@ -13,6 +13,8 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _OAUTH_CLIENT_CONFIG_PATH = _BASE_DIR / "datos" / "google_oauth_client.json"
 _OAUTH_TOKEN_PATH = _BASE_DIR / "datos" / "google_drive_token.json"
+_ENV_OAUTH_CLIENT_JSON = "GOOGLE_OAUTH_CLIENT_JSON"
+_ENV_OAUTH_CLIENT_PATH = "GOOGLE_OAUTH_CLIENT_PATH"
 
 _MESES = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -87,6 +89,43 @@ def cargar_client_config(desde_json):
     return client_config
 
 
+def _obtener_secret_streamlit(clave):
+    try:
+        import streamlit as st
+    except Exception:
+        return None
+
+    try:
+        if clave in st.secrets:
+            return st.secrets[clave]
+
+        if "google_drive" in st.secrets:
+            secretos_drive = st.secrets["google_drive"]
+            if hasattr(secretos_drive, "get"):
+                return secretos_drive.get(clave)
+            if clave in secretos_drive:
+                return secretos_drive[clave]
+    except Exception:
+        return None
+
+    return None
+
+
+def _resolver_ruta_externa_config(valor):
+    texto = str(valor or "").strip()
+    if not texto:
+        return None
+    return Path(os.path.expandvars(os.path.expanduser(texto)))
+
+
+def _cargar_client_config_desde_archivo(ruta_config):
+    if not ruta_config or not ruta_config.exists() or not ruta_config.is_file():
+        return None
+
+    with ruta_config.open("r", encoding="utf-8") as archivo:
+        return cargar_client_config(archivo.read())
+
+
 def _resolver_ruta_client_config_drive():
     # Primero usa la ruta canónica y, si no existe, tolera una doble extensión común en Windows.
     candidatos = [_OAUTH_CLIENT_CONFIG_PATH, _OAUTH_CLIENT_CONFIG_PATH.with_suffix(".json.json")]
@@ -97,16 +136,44 @@ def _resolver_ruta_client_config_drive():
 
 
 def obtener_ruta_client_config_drive():
+    ruta_externa = _resolver_ruta_externa_config(os.getenv(_ENV_OAUTH_CLIENT_PATH))
+    if ruta_externa is not None:
+        return ruta_externa
+
+    ruta_secreto = _resolver_ruta_externa_config(_obtener_secret_streamlit("google_oauth_client_path"))
+    if ruta_secreto is not None:
+        return ruta_secreto
+
     return _resolver_ruta_client_config_drive()
 
 
-def cargar_client_config_local():
-    ruta_config = _resolver_ruta_client_config_drive()
-    if not ruta_config.exists():
-        return None
+def resolver_client_config_drive():
+    json_entorno = str(os.getenv(_ENV_OAUTH_CLIENT_JSON, "")).strip()
+    if json_entorno:
+        return cargar_client_config(json_entorno), f"variable de entorno {_ENV_OAUTH_CLIENT_JSON}"
 
-    with ruta_config.open("r", encoding="utf-8") as archivo:
-        return cargar_client_config(archivo.read())
+    json_secreto = _obtener_secret_streamlit("google_oauth_client_json")
+    if json_secreto:
+        return cargar_client_config(str(json_secreto)), "secreto de Streamlit google_oauth_client_json"
+
+    ruta_externa = _resolver_ruta_externa_config(os.getenv(_ENV_OAUTH_CLIENT_PATH))
+    if ruta_externa and ruta_externa.exists() and ruta_externa.is_file():
+        return _cargar_client_config_desde_archivo(ruta_externa), f"variable de entorno {_ENV_OAUTH_CLIENT_PATH} ({ruta_externa})"
+
+    ruta_secreto = _resolver_ruta_externa_config(_obtener_secret_streamlit("google_oauth_client_path"))
+    if ruta_secreto and ruta_secreto.exists() and ruta_secreto.is_file():
+        return _cargar_client_config_desde_archivo(ruta_secreto), f"secreto de Streamlit google_oauth_client_path ({ruta_secreto})"
+
+    ruta_local = _resolver_ruta_client_config_drive()
+    if ruta_local.exists() and ruta_local.is_file():
+        return _cargar_client_config_desde_archivo(ruta_local), f"archivo local ({ruta_local})"
+
+    return None, "sin configurar"
+
+
+def cargar_client_config_local():
+    client_config, _ = resolver_client_config_drive()
+    return client_config
 
 
 def autorizar_google_drive(client_config):
