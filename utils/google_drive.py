@@ -13,6 +13,7 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _OAUTH_CLIENT_CONFIG_PATH = _BASE_DIR / "datos" / "google_oauth_client.json"
 _OAUTH_TOKEN_PATH = _BASE_DIR / "datos" / "google_drive_token.json"
+_STREAMLIT_SECRETS_PATH = _BASE_DIR / ".streamlit" / "secrets.toml"
 _ENV_OAUTH_CLIENT_JSON = "GOOGLE_OAUTH_CLIENT_JSON"
 _ENV_OAUTH_CLIENT_PATH = "GOOGLE_OAUTH_CLIENT_PATH"
 
@@ -111,6 +112,26 @@ def _obtener_secret_streamlit(clave):
     return None
 
 
+def _obtener_secret_desde_archivo(clave):
+    if not _STREAMLIT_SECRETS_PATH.exists() or not _STREAMLIT_SECRETS_PATH.is_file():
+        return None
+
+    try:
+        import tomllib
+
+        secretos = tomllib.loads(_STREAMLIT_SECRETS_PATH.read_text(encoding="utf-8"))
+        if clave in secretos:
+            return secretos.get(clave)
+
+        secretos_drive = secretos.get("google_drive")
+        if isinstance(secretos_drive, dict):
+            return secretos_drive.get(clave)
+    except Exception:
+        return None
+
+    return None
+
+
 def _resolver_ruta_externa_config(valor):
     texto = str(valor or "").strip()
     if not texto:
@@ -144,6 +165,10 @@ def obtener_ruta_client_config_drive():
     if ruta_secreto is not None:
         return ruta_secreto
 
+    ruta_secreto_archivo = _resolver_ruta_externa_config(_obtener_secret_desde_archivo("google_oauth_client_path"))
+    if ruta_secreto_archivo is not None:
+        return ruta_secreto_archivo
+
     return _resolver_ruta_client_config_drive()
 
 
@@ -156,6 +181,10 @@ def resolver_client_config_drive():
     if json_secreto:
         return cargar_client_config(str(json_secreto)), "secreto de Streamlit google_oauth_client_json"
 
+    json_secreto_archivo = _obtener_secret_desde_archivo("google_oauth_client_json")
+    if json_secreto_archivo:
+        return cargar_client_config(str(json_secreto_archivo)), f"archivo {_STREAMLIT_SECRETS_PATH} (google_oauth_client_json)"
+
     ruta_externa = _resolver_ruta_externa_config(os.getenv(_ENV_OAUTH_CLIENT_PATH))
     if ruta_externa and ruta_externa.exists() and ruta_externa.is_file():
         return _cargar_client_config_desde_archivo(ruta_externa), f"variable de entorno {_ENV_OAUTH_CLIENT_PATH} ({ruta_externa})"
@@ -163,6 +192,10 @@ def resolver_client_config_drive():
     ruta_secreto = _resolver_ruta_externa_config(_obtener_secret_streamlit("google_oauth_client_path"))
     if ruta_secreto and ruta_secreto.exists() and ruta_secreto.is_file():
         return _cargar_client_config_desde_archivo(ruta_secreto), f"secreto de Streamlit google_oauth_client_path ({ruta_secreto})"
+
+    ruta_secreto_archivo = _resolver_ruta_externa_config(_obtener_secret_desde_archivo("google_oauth_client_path"))
+    if ruta_secreto_archivo and ruta_secreto_archivo.exists() and ruta_secreto_archivo.is_file():
+        return _cargar_client_config_desde_archivo(ruta_secreto_archivo), f"archivo {_STREAMLIT_SECRETS_PATH} (google_oauth_client_path -> {ruta_secreto_archivo})"
 
     ruta_local = _resolver_ruta_client_config_drive()
     if ruta_local.exists() and ruta_local.is_file():
