@@ -391,7 +391,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
             else:
                 resumen_analizadores = ["Sin analizadores registrados en este paquete."]
 
-        zip_file.writestr(f"{nombre_carpeta}/analizadores_utilizados.txt", "\n".join(resumen_analizadores))
+        #zip_file.writestr(f"{nombre_carpeta}/analizadores_utilizados.txt", "\n".join(resumen_analizadores))
 
         status_text.empty()
 

@@ -93,7 +93,7 @@ with st.container(border=True):
     try:
         client_config = google_drive.cargar_client_config_local()
     except Exception as exc:
-        st.error(f"La configuración OAuth local no es válida: {exc}")
+        st.error(f"La configuración Auth local no es válida: {exc}")
 
     config_disponible = client_config is not None
     if config_disponible:
