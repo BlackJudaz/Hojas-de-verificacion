@@ -1,6 +1,19 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
 .env
+.streamlit/
+.vscode/
+
+# Secretos y credenciales locales
 datos/google_oauth_client.json
 datos/google_drive_credentials.json
+datos/google_drive_token.json
+
+# Salidas generadas por la app
+reportes/
+
+# Archivos temporales de sistema
+.DS_Store
+Thumbs.db
