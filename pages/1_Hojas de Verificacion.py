@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -23,6 +24,26 @@ config = {
 }
 
 
+def _normalizar_texto(valor):
+    texto = str(valor or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r"\s+", " ", texto)
+    return texto.strip()
+
+
+def _resolver_serie_desde_fila(fila):
+    for clave in (
+        "serie", "sn", "ns", "n_s", "num_serie", "numero_serie", "numero de serie",
+        "SERIE", "SN", "NS", "NUMERO DE SERIE"
+    ):
+        valor = fila.get(clave, "") if hasattr(fila, "get") else ""
+        texto = str(valor or "").strip()
+        if texto:
+            return texto
+    return ""
+
+
 def inicializar_estado():
     if "inventario_df" not in st.session_state:
         st.session_state.inventario_df = None
@@ -32,6 +53,8 @@ def inicializar_estado():
         st.session_state.analizadores_seleccionados = []
     if "periodicidad_por_concepto" not in st.session_state:
         st.session_state.periodicidad_por_concepto = {}
+    if "tiempo_mantenimiento_por_concepto" not in st.session_state:
+        st.session_state.tiempo_mantenimiento_por_concepto = {}
     if "analizadores_propios_por_concepto" not in st.session_state:
         st.session_state.analizadores_propios_por_concepto = {}
     if "fecha_mantenimiento_por_concepto" not in st.session_state:
@@ -51,11 +74,14 @@ def inicializar_estado():
     for key in ("filtro_concepto", "filtro_marca", "filtro_activo", "filtro_ubicacion"):
         if key not in st.session_state:
             st.session_state[key] = []
+    if "filtro_tipo_activo_display" not in st.session_state:
+        st.session_state.filtro_tipo_activo_display = []
 
 
 def limpiar_filtros():
     st.session_state.clic_buscar = False
     st.session_state.filtro_concepto = []
+    st.session_state.filtro_tipo_activo_display = []
     st.session_state.filtro_marca = []
     st.session_state.filtro_activo = []
     st.session_state.filtro_ubicacion = []
@@ -97,11 +123,42 @@ with st.container(border=True):
             "UBICACIÓN": opciones_disponibles(df_con_filtros(df, estados, excluir="filtro_ubicacion"), "UBICACIÓN")
         }
 
+        # Para que el buscador del multiselect no dependa de acentos,
+        # se muestran opciones normalizadas y se traducen de vuelta
+        # al concepto real para aplicar filtros sin romper la lógica.
+        mapa_tipo_display_a_conceptos = {}
+        opciones_tipo_display = []
+        for concepto_original in opciones["CONCEPTO"]:
+            clave_display = _normalizar_texto(concepto_original)
+            if not clave_display:
+                continue
+            if clave_display not in mapa_tipo_display_a_conceptos:
+                mapa_tipo_display_a_conceptos[clave_display] = []
+                opciones_tipo_display.append(clave_display)
+            mapa_tipo_display_a_conceptos[clave_display].append(concepto_original)
+
+        seleccion_display_actual = [
+            valor for valor in st.session_state.get("filtro_tipo_activo_display", [])
+            if valor in mapa_tipo_display_a_conceptos
+        ]
+        if seleccion_display_actual != st.session_state.get("filtro_tipo_activo_display", []):
+            st.session_state.filtro_tipo_activo_display = seleccion_display_actual
+
         fila1_col1, fila1_col2 = st.columns(2)
         with fila1_col1:
-            st.multiselect(label="Concepto", options=opciones["CONCEPTO"],
-                           key="filtro_concepto", placeholder="Selecciona uno o varios conceptos",
-                           label_visibility="collapsed")
+            st.multiselect(
+                label="Tipo de activo",
+                options=opciones_tipo_display,
+                key="filtro_tipo_activo_display",
+                placeholder="Selecciona uno o varios tipos de activo",
+                label_visibility="collapsed",
+                format_func=lambda x: str(x).title()
+            )
+
+            conceptos_filtrados = []
+            for display in st.session_state.get("filtro_tipo_activo_display", []):
+                conceptos_filtrados.extend(mapa_tipo_display_a_conceptos.get(display, []))
+            st.session_state.filtro_concepto = list(dict.fromkeys(conceptos_filtrados))
         with fila1_col2:
             st.multiselect(label="Marca", options=opciones["MARCA"],
                            key="filtro_marca", placeholder="Selecciona una o varias marcas",
@@ -157,39 +214,26 @@ if st.session_state.clic_buscar:
 
         conceptos_seleccionados = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
 
-        # ── Periodicidad ─────────────────────────────────────────────────────
-        st.markdown("### Periodicidad de mantenimiento por tipo de activo")
-        opciones_periodicidad = ["Bimestral", "Cuatrimestral", "Semestral", "Anual"]
-        periodicidades_por_concepto = st.session_state.periodicidad_por_concepto.copy()
-
-        for concepto in conceptos_seleccionados:
-            clave_limpia = re.sub(r'\W+', '_', concepto.strip().lower()).strip('_')
-            clave = f"periodicidad_{clave_limpia}"            
-            default = periodicidades_por_concepto.get(concepto, "Anual")
-            if default not in opciones_periodicidad:
-                default = "Anual"
-            seleccion = st.selectbox(
-                label=f"Periodicidad para {concepto}",
-                options=opciones_periodicidad,
-                index=opciones_periodicidad.index(default),
-                key=clave
-            )
-            periodicidades_por_concepto[concepto] = seleccion
-
-        st.session_state.periodicidad_por_concepto = periodicidades_por_concepto
-        equipos_a_mantener["PERIODICIDAD"] = equipos_a_mantener["CONCEPTO"].map(
-            periodicidades_por_concepto).fillna("Anual")
-
         # ── Analizadores ──────────────────────────────────────────────────────
         analizador_seleccionado_por_concepto = []
         analizadores_por_concepto = {}
+        opciones_periodicidad = ["Bimestral", "Cuatrimestral", "Semestral", "Anual"]
+        periodicidades_por_concepto = st.session_state.periodicidad_por_concepto.copy()
+        tiempos_por_concepto = st.session_state.tiempo_mantenimiento_por_concepto.copy()
 
-        if analizadores_df is not None:
-            st.markdown("### Selección de analizadores por tipo de equipo")
+        st.markdown("### Selección de analizadores por tipo de equipo")
+        if analizadores_df is None:
+            st.info("No se pudo cargar la lista BEL. Aun así puedes capturar frecuencia y analizadores propios.")
+            opciones_bel = []
+        else:
             opciones_bel = list(dict.fromkeys(obtener_analizadores_display(analizadores_df)))
-            for concepto in conceptos_seleccionados:
-                sugeridos = buscar_analizadores_por_concepto(analizadores_df, [concepto])
-                opciones_sugeridas = list(dict.fromkeys(obtener_analizadores_display(sugeridos)))
+
+        for concepto in conceptos_seleccionados:
+                if analizadores_df is not None:
+                    sugeridos = buscar_analizadores_por_concepto(analizadores_df, [concepto])
+                    opciones_sugeridas = list(dict.fromkeys(obtener_analizadores_display(sugeridos)))
+                else:
+                    opciones_sugeridas = []
                 opciones_disponibles_bel = list(dict.fromkeys(opciones_sugeridas + opciones_bel))
                 clave_concepto = re.sub(r"\W+", "_", concepto.strip().lower()).strip("_")
                 key = f"analizadores_{clave_concepto}"
@@ -200,6 +244,33 @@ if st.session_state.clic_buscar:
 
                 with st.container(border=True):
                     st.markdown(f"#### {concepto}")
+
+                    st.markdown("**Frecuencia y tiempo de mantenimiento**")
+                    col_freq, col_tiempo = st.columns([3, 2])
+                    with col_freq:
+                        default_periodicidad = periodicidades_por_concepto.get(concepto, "Anual")
+                        if default_periodicidad not in opciones_periodicidad:
+                            default_periodicidad = "Anual"
+                        periodicidad_elegida = st.selectbox(
+                            label=f"Periodicidad para {concepto}",
+                            options=opciones_periodicidad,
+                            index=opciones_periodicidad.index(default_periodicidad),
+                            key=f"periodicidad_{clave_concepto}"
+                        )
+                        periodicidades_por_concepto[concepto] = periodicidad_elegida
+
+                    with col_tiempo:
+                        tiempo_actual = tiempos_por_concepto.get(concepto, "")
+                        tiempo_manual = st.text_input(
+                            label=f"Tiempo de mantenimiento para {concepto}",
+                            key=f"tiempo_mantenimiento_{clave_concepto}",
+                            value=tiempo_actual,
+                            placeholder="Ej. 1 h, 2 h",
+                            help="Sugerencia de formato: 1 h, 2 h. Puedes capturarlo como prefieras."
+                        )
+                        tiempos_por_concepto[concepto] = str(tiempo_manual or "").strip()
+
+                    st.caption("El formato de tiempo es sugerido; el sistema permite capturarlo libremente.")
 
                     analizadores_propios_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
                     total_propios_guardados = len(analizadores_propios_guardados)
@@ -263,7 +334,7 @@ if st.session_state.clic_buscar:
                     usar_propios = st.checkbox(
                         f"Agregar analizadores propios para {concepto}",
                         key=key_propios_flag,
-                        value=False,
+                        value=bool(st.session_state["analizadores_propios_por_concepto"].get(concepto, [])),
                         help="Úsalo cuando el analizador no aparezca en las sugerencias o necesites registrar uno específico."
                     )
 
@@ -271,12 +342,11 @@ if st.session_state.clic_buscar:
                     if usar_propios:
                         cupo_propios = max(0, 3 - len(seleccion))
                         if cupo_propios == 0:
-                            st.error(
-                                f"No puedes agregar analizadores propios para '{concepto}' porque ya seleccionaste 3 analizadores en total (BEL + propios)."
+                            st.warning(
+                                f"Ya seleccionaste 3 analizadores BEL para '{concepto}'. No se pueden agregar más propios, pero se conserva lo que ya tenías guardado."
                             )
-                            st.session_state["analizadores_propios_por_concepto"][concepto] = []
-                            analizadores_propios = []
-                            analizadores_por_concepto[concepto] = analizadores_del_concepto
+                            analizadores_propios = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
+                            analizadores_por_concepto[concepto] = analizadores_del_concepto + analizadores_propios
                             continue
 
                         datos_guardados = st.session_state["analizadores_propios_por_concepto"].get(concepto, [])
@@ -287,7 +357,7 @@ if st.session_state.clic_buscar:
                                     "tipo": item.get("tipo", item.get("Analizador", "")),
                                     "marca": item.get("marca", ""),
                                     "modelo": item.get("modelo", ""),
-                                    "serie": item.get("serie", "")
+                                    "serie": _resolver_serie_desde_fila(item)
                                 })
                             df_propios_inicial = pd.DataFrame(datos_normalizados)
                         else:
@@ -309,10 +379,10 @@ if st.session_state.clic_buscar:
                                 hide_index=True,
                                 num_rows="dynamic",
                                 column_config={
-                                    "tipo": "Tipo de Analizador",
-                                    "marca": "Marca",
-                                    "modelo": "Modelo",
-                                    "serie": "Numero de serie"
+                                    "tipo": st.column_config.TextColumn("Tipo de Analizador"),
+                                    "marca": st.column_config.TextColumn("Marca"),
+                                    "modelo": st.column_config.TextColumn("Modelo"),
+                                    "serie": st.column_config.TextColumn("Numero de serie")
                                 }
                             )
                             guardar_propios = st.form_submit_button(
@@ -326,7 +396,7 @@ if st.session_state.clic_buscar:
                                 tipo = str(fila.get("tipo", "")).strip()
                                 marca = str(fila.get("marca", "")).strip()
                                 modelo = str(fila.get("modelo", "")).strip()
-                                serie = str(fila.get("serie", "")).strip()
+                                serie = _resolver_serie_desde_fila(fila)
 
                                 if not any([tipo, marca, modelo, serie]):
                                     continue
@@ -335,7 +405,8 @@ if st.session_state.clic_buscar:
                                     "tipo": tipo,
                                     "marca": marca,
                                     "modelo": modelo,
-                                    "serie": serie
+                                    "serie": serie,
+                                    "sn": serie
                                 })
 
                             if len(nuevos_analizadores_propios) > cupo_propios:
@@ -349,8 +420,19 @@ if st.session_state.clic_buscar:
                             st.session_state["analizadores_propios_por_concepto"][concepto] = nuevos_analizadores_propios
                             analizadores_propios = nuevos_analizadores_propios
                     else:
-                        st.session_state["analizadores_propios_por_concepto"][concepto] = []
-                        analizadores_propios = []
+                        if analizadores_propios:
+                            st.info(
+                                "Hay analizadores propios guardados para este concepto. Se seguirán usando al generar el paquete."
+                            )
+                            if st.button(
+                                f"Borrar analizadores propios de {concepto}",
+                                key=f"borrar_analizadores_propios_{clave_concepto}",
+                                use_container_width=True
+                            ):
+                                st.session_state["analizadores_propios_por_concepto"][concepto] = []
+                                analizadores_propios = []
+                                st.success("Analizadores propios eliminados para este concepto.")
+                                st.rerun()
 
                     if analizadores_propios:
                         st.caption(f"Analizadores propios registrados: {len(analizadores_propios)}")
@@ -378,6 +460,13 @@ if st.session_state.clic_buscar:
                         st.session_state["fecha_mantenimiento_por_concepto"].pop(concepto, None)
 
                     analizadores_por_concepto[concepto] = analizadores_del_concepto + analizadores_propios
+
+        st.session_state.periodicidad_por_concepto = periodicidades_por_concepto
+        st.session_state.tiempo_mantenimiento_por_concepto = tiempos_por_concepto
+        equipos_a_mantener["PERIODICIDAD"] = equipos_a_mantener["CONCEPTO"].map(
+            periodicidades_por_concepto).fillna("Anual")
+        equipos_a_mantener["TIEMPO MANTENIMIENTO"] = equipos_a_mantener["CONCEPTO"].map(
+            tiempos_por_concepto).fillna("")
 
         st.session_state["analizadores_seleccionados"] = list(
             dict.fromkeys(analizador_seleccionado_por_concepto))

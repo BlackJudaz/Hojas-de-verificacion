@@ -46,7 +46,7 @@ def _tamano_legible(contenido):
 
 
 st.title("☁️ Google Drive")
-st.info("Conecta tu cuenta de Google Drive para guardar el contenido del paquete como documentos separados, sin descargar nada localmente.")
+st.info("Conecta tu cuenta de Google Drive para guardar el contenido del paquete sin descargar nada localmente. Los archivos de Excel se convierten a Google Sheets manteniendo las casillas de verificación.")
 st.divider()
 
 if not hasattr(google_drive, "cargar_client_config_local") or not hasattr(google_drive, "resolver_client_config_drive"):
@@ -63,7 +63,8 @@ periodo_iso = st.session_state.get("ultimo_paquete_periodo", "")
 nombre_carpeta_sugerido = st.session_state.get("ultimo_paquete_drive_folder", "")
 periodo_mixto = st.session_state.get("ultimo_paquete_periodo_mixto", False)
 fecha_generacion = st.session_state.get("ultimo_paquete_generado_en", "")
-fecha_periodo = _resolver_fecha_periodo(periodo_iso)
+ruta_fecha_actual = datetime.now().date()
+fecha_periodo = ruta_fecha_actual
 ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
 
 if not contenido_zip or not nombre_zip:
@@ -147,15 +148,20 @@ with st.container(border=True):
     st.write(f"Ruta destino: {' / '.join(ruta_drive_destino)}")
     if nombre_carpeta_sugerido:
         st.caption(f"Referencia anterior del paquete: {nombre_carpeta_sugerido}.")
-    st.caption("Si ya existen archivos con el mismo nombre dentro de la carpeta de destino, se guardarán como 'archivo(1)', 'archivo(2)', etc.")
+    st.caption("La ruta Documentación MP / Año / Mes se reutiliza si ya existe (solo se crea cuando falta). Los archivos .xlsx se convierten a Google Sheets y sus columnas de verificación se conservan como casillas. Si un archivo ya existe en la misma ruta, se guarda como ' (1)', ' (2)', etc., sin reemplazar el anterior.")
 
     if st.button("Subir último paquete a Google Drive", use_container_width=True, disabled=not bool(credenciales_drive), type="primary"):
         try:
             with st.spinner("Subiendo contenido a Google Drive..."):
-                service, credenciales_actualizadas = google_drive.construir_servicio_drive(credenciales_drive)
+                service, service_sheets, credenciales_actualizadas = google_drive.construir_servicios_google(credenciales_drive)
                 carpetas = google_drive.obtener_o_crear_ruta_carpetas(service, ruta_drive_destino)
                 carpeta_destino = carpetas[-1]
-                archivos = google_drive.subir_zip_como_documentos(service, contenido_zip, folder_id=carpeta_destino["id"])
+                archivos = google_drive.subir_zip_como_documentos(
+                    service,
+                    contenido_zip,
+                    folder_id=carpeta_destino["id"],
+                    service_sheets=service_sheets
+                )
 
                 st.session_state.google_drive_credentials = credenciales_actualizadas
                 st.session_state.google_drive_usuario = google_drive.obtener_usuario_conectado(service)
@@ -163,7 +169,18 @@ with st.container(border=True):
             st.success(
                 f"Se subieron {len(archivos)} documento(s) a Google Drive en la ruta {' / '.join(ruta_drive_destino)}."
             )
+            total_fallback = sum(1 for archivo in archivos if archivo.get("_checkbox_fallback"))
+            if total_fallback > 0:
+                st.warning(
+                    f"{total_fallback} archivo(s) Excel se subieron como .xlsx sin conversión a Google Sheets porque la API/permisos de Sheets no están disponibles. "
+                    "Si quieres conservar casillas en Google Sheets, habilita Google Sheets API y vuelve a conectar tu cuenta."
+                )
             if carpeta_destino.get("webViewLink"):
                 st.link_button("Abrir carpeta en Google Drive", carpeta_destino["webViewLink"], use_container_width=True)
         except Exception as exc:
-            st.error(f"No se pudo subir el paquete a Google Drive: {exc}")
+            if google_drive.es_error_de_scopes_google(exc):
+                st.error("La sesión actual no tiene permisos para crear Google Sheets. Desconecta tu cuenta y vuelve a conectarla para actualizar los permisos.")
+            elif google_drive.es_error_api_sheets_deshabilitada(exc):
+                st.error("Google Sheets API está deshabilitada en tu proyecto de Google Cloud. Habilítala, espera unos minutos y vuelve a intentar.")
+            else:
+                st.error(f"No se pudo subir el paquete a Google Drive: {exc}")

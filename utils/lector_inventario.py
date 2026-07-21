@@ -372,37 +372,84 @@ def aplicar_programacion_tinc(df_inventario, df_programacion):
             df["URL TINC"] = ""
         return df
 
-    mapa_folios = (
-        df_programacion.dropna(subset=["id_tinc", "folio"])
-        .assign(id_tinc=lambda x: x["id_tinc"].astype(str).str.strip().str.upper())
-        .assign(folio=lambda x: x["folio"].astype(str).str.strip().str.upper())
-        .drop_duplicates(subset=["id_tinc"], keep="first")
-        .set_index("id_tinc")["folio"]
-        .to_dict()
-    )
-    mapa_urls = (
-        df_programacion.dropna(subset=["id_tinc", "folio"])
-        .assign(id_tinc=lambda x: x["id_tinc"].astype(str).str.strip().str.upper())
-        .assign(url=lambda x: x["url"].astype(str).str.strip() if "url" in x.columns else "")
-        .drop_duplicates(subset=["id_tinc"], keep="first")
-        .set_index("id_tinc")["url"]
-        .to_dict()
-    )
+    def _normalizar_id(valor):
+        return str(valor or "").strip().upper().replace(" ", "")
+
+    def _extraer_ast(valor):
+        texto = _normalizar_id(valor)
+        match = re.search(r"AST\d+", texto, flags=re.IGNORECASE)
+        return match.group(0).upper() if match else ""
+
+    programacion = df_programacion.dropna(subset=["id_tinc", "folio"]).copy()
+    if programacion.empty:
+        if "ID TINC" not in df.columns:
+            df["ID TINC"] = df.get("# ACTIVO", "")
+        if "FOLIO TINC" not in df.columns:
+            df["FOLIO TINC"] = ""
+        if "URL TINC" not in df.columns:
+            df["URL TINC"] = ""
+        return df
+
+    programacion["id_norm"] = programacion["id_tinc"].apply(_normalizar_id)
+    programacion["id_ast"] = programacion["id_tinc"].apply(_extraer_ast)
+    programacion["folio_norm"] = programacion["folio"].astype(str).str.strip().str.upper()
+    if "url" in programacion.columns:
+        programacion["url_norm"] = programacion["url"].astype(str).str.strip()
+    else:
+        programacion["url_norm"] = ""
+
+    mapa_por_id = {}
+    for _, fila in programacion.iterrows():
+        folio = fila.get("folio_norm", "")
+        url = fila.get("url_norm", "")
+        id_norm = fila.get("id_norm", "")
+        id_ast = fila.get("id_ast", "")
+
+        if id_norm and id_norm not in mapa_por_id:
+            mapa_por_id[id_norm] = (folio, url)
+        if id_ast and id_ast not in mapa_por_id:
+            mapa_por_id[id_ast] = (folio, url)
 
     if "ID TINC" not in df.columns:
         df["ID TINC"] = df.get("# ACTIVO", "")
     else:
         df["ID TINC"] = df["ID TINC"].fillna("").astype(str).str.strip()
-    if "URL TINC" not in df.columns:
-        df["URL TINC"] = ""
 
-    activos = df.get("# ACTIVO", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.strip().str.upper()
-    ids_tinc = df["ID TINC"].fillna("").astype(str).str.strip().str.upper()
-    df["FOLIO TINC"] = activos.map(mapa_folios).fillna("")
-    df["URL TINC"] = activos.map(mapa_urls).fillna("")
-    faltantes = df["FOLIO TINC"].eq("")
-    if faltantes.any():
-        df.loc[faltantes, "FOLIO TINC"] = ids_tinc[faltantes].map(mapa_folios).fillna("")
-        df.loc[faltantes, "URL TINC"] = ids_tinc[faltantes].map(mapa_urls).fillna("")
+    folio_previo = (
+        df["FOLIO TINC"].fillna("").astype(str).str.strip()
+        if "FOLIO TINC" in df.columns else pd.Series([""] * len(df), index=df.index)
+    )
+    url_previa = (
+        df["URL TINC"].fillna("").astype(str).str.strip()
+        if "URL TINC" in df.columns else pd.Series([""] * len(df), index=df.index)
+    )
+
+    df["FOLIO TINC"] = folio_previo.copy()
+    df["URL TINC"] = url_previa.copy()
+
+    activos = df.get("# ACTIVO", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
+    ids_tinc = df["ID TINC"].fillna("").astype(str)
+
+    for idx in df.index:
+        candidatos = [
+            _normalizar_id(activos.at[idx]),
+            _extraer_ast(activos.at[idx]),
+            _normalizar_id(ids_tinc.at[idx]),
+            _extraer_ast(ids_tinc.at[idx]),
+        ]
+        candidatos = [c for c in candidatos if c]
+
+        match = None
+        for candidato in candidatos:
+            if candidato in mapa_por_id:
+                match = mapa_por_id[candidato]
+                break
+
+        if match is not None:
+            folio, url = match
+            if folio:
+                df.at[idx, "FOLIO TINC"] = folio
+            if url:
+                df.at[idx, "URL TINC"] = url
 
     return df

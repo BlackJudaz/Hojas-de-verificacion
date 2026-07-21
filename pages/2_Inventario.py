@@ -22,6 +22,7 @@ def _resetear_estado_inventario():
     st.session_state.analizadores_por_concepto = {}
     st.session_state.analizadores_propios_por_concepto = {}
     st.session_state.periodicidad_por_concepto = {}
+    st.session_state.tiempo_mantenimiento_por_concepto = {}
     st.session_state.fecha_mantenimiento_por_concepto = {}
 
 if "programacion_tinc_texto" not in st.session_state:
