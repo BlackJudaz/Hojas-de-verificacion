@@ -122,6 +122,23 @@ def _obtener_celda_para_escribir(ws, fila, columna):
     return ws.cell(row=fila, column=columna)
 
 
+def _copiar_imagenes_hoja(ws_origen, ws_destino):
+    """Copia las imagenes de una hoja a otra conservando su ancla."""
+    imagenes = getattr(ws_origen, "_images", []) or []
+    for imagen in imagenes:
+        try:
+            imagen_copia = copy(imagen)
+            if hasattr(imagen, "anchor"):
+                try:
+                    imagen_copia.anchor = copy(imagen.anchor)
+                except Exception:
+                    imagen_copia.anchor = imagen.anchor
+            ws_destino.add_image(imagen_copia)
+        except Exception:
+            # Si una imagen puntual falla, no detener la generacion completa.
+            continue
+
+
 def _escribir_valor(ws, fila, columna, valor):
     celda = _obtener_celda_para_escribir(ws, fila, columna)
     celda.value = valor
@@ -429,6 +446,19 @@ def _obtener_tipo_activo(equipo):
     return str(equipo.get("CONCEPTO", "SIN_TIPO_ACTIVO")).strip()
 
 
+def _construir_ubicacion_sububicacion(equipo):
+    ubicacion = str(equipo.get("UBICACIÓN", "") or "").strip()
+    sububicacion = ""
+    for clave in ("SUB UBICACIÓN", "SUBUBICACIÓN", "SUB UBICACION", "SUBUBICACION"):
+        if clave in equipo and str(equipo.get(clave, "") or "").strip():
+            sububicacion = str(equipo.get(clave, "") or "").strip()
+            break
+
+    if ubicacion and sububicacion:
+        return f"{ubicacion} - {sububicacion}"
+    return ubicacion or sububicacion
+
+
 def _construir_nombre_hoja(equipo, usados):
     """Construye un nombre de hoja único y válido para Excel (<=31 caracteres)."""
     activo = _normalizar_nombre_archivo(_obtener_identificador_activo(equipo))
@@ -456,7 +486,7 @@ def _construir_nombre_hoja(equipo, usados):
 
 def _llenar_hoja_verificacion(ws, equipo, ingeniero, jefe, hospital, nombre_plantilla, analizadores=None):
     ws["G12"] = hospital
-    ws["G13"] = equipo.get("UBICACIÓN", "")
+    ws["G13"] = _construir_ubicacion_sububicacion(equipo)
     ws["G14"] = equipo.get("# ACTIVO", equipo.get("ID TINC", equipo.get("id tinc", "")))
     celda_folio = _obtener_celda_folio_por_pestana(nombre_plantilla)
     folio_tinc = equipo.get("FOLIO TINC", equipo.get("FOLIO", ""))
@@ -641,6 +671,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                     try:
                         ws_base = wb_concepto[pestana]
                         ws_equipo = wb_concepto.copy_worksheet(ws_base)
+                        _copiar_imagenes_hoja(ws_base, ws_equipo)
                         ws_equipo.title = _construir_nombre_hoja(equipo_dict, nombres_usados)
                         _llenar_hoja_verificacion(
                             ws_equipo,
@@ -832,6 +863,32 @@ def _resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base):
     return _resolver_fecha_base(fecha_hoy, fecha_mantenimiento_base)
 
 
+def _ajustar_texto_a_ancho(canvas_obj, texto, fuente, tamano, ancho_maximo, sufijo="..."):
+    texto_base = str(texto or "")
+    if ancho_maximo <= 0:
+        return ""
+
+    if canvas_obj.stringWidth(texto_base, fuente, tamano) <= ancho_maximo:
+        return texto_base
+
+    texto_base = texto_base.strip()
+    if not texto_base:
+        return ""
+
+    ancho_sufijo = canvas_obj.stringWidth(sufijo, fuente, tamano)
+    if ancho_sufijo >= ancho_maximo:
+        return ""
+
+    fin = len(texto_base)
+    while fin > 0:
+        candidato = texto_base[:fin].rstrip() + sufijo
+        if canvas_obj.stringWidth(candidato, fuente, tamano) <= ancho_maximo:
+            return candidato
+        fin -= 1
+
+    return ""
+
+
 def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
@@ -941,7 +998,7 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
             ("Modelo",         str(row.get("MODELO", ""))),
             ("No. Serie",      str(row.get("No. DE SERIE", ""))),
             ("No. Inventario", str(row.get("# ACTIVO", ""))),
-            ("Area",           str(row.get("UBICACIÓN", ""))),
+            ("Area",           _construir_ubicacion_sububicacion(row)),
         ]
 
         # Reducir el espaciado entre renglones para que todo quepa en la etiqueta
@@ -961,7 +1018,15 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
             lx = x + 2*mm + ancho_label + 1*mm
             c.line(lx, yc - 0.8*mm, x + aw - 2*mm, yc - 0.8*mm)
             c.setFont("Helvetica", fuente_campos)
-            c.drawString(lx + 1*mm, yc, valor[:30])
+            ancho_disponible = (x + aw - 2*mm) - (lx + 1*mm)
+            valor_ajustado = _ajustar_texto_a_ancho(
+                c,
+                valor,
+                "Helvetica",
+                fuente_campos,
+                ancho_disponible
+            )
+            c.drawString(lx + 1*mm, yc, valor_ajustado)
 
         # ── Firma del ingeniero (directamente debajo de 'Area') ──────────────
         # Calcular la posición de la última línea de campo (Area) usando el nuevo paso
