@@ -1,5 +1,5 @@
+# pages/Hojas de Verificacion.py
 import re
-import unicodedata
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -15,34 +15,19 @@ from utils.lector_analizadores import (
     obtener_analizadores_display,
     parse_analizador_display
 )
-from utils.lector_inventario import aplicar_filtros, opciones_disponibles, df_con_filtros
+from utils.lector_inventario import (
+    aplicar_filtros,
+    opciones_disponibles,
+    df_con_filtros,
+    normalizar_texto,          # antes _normalizar_texto, ahora importada
+)
+from utils.gestor_plantillas import _resolver_serie_desde_fila  # movida a gestor_plantillas
 
 config = {
     "nombre":   st.session_state.get("nombre_ingeniero", ""),
     "jefe":     st.session_state.get("nombre_jefe", ""),
     "hospital": st.session_state.get("nombre_hospital", "")
 }
-
-
-def _normalizar_texto(valor):
-    texto = str(valor or "").strip().lower()
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(c for c in texto if not unicodedata.combining(c))
-    texto = re.sub(r"\s+", " ", texto)
-    return texto.strip()
-
-
-def _resolver_serie_desde_fila(fila):
-    for clave in (
-        "serie", "sn", "ns", "n_s", "num_serie", "numero_serie", "numero de serie",
-        "SERIE", "SN", "NS", "NUMERO DE SERIE"
-    ):
-        valor = fila.get(clave, "") if hasattr(fila, "get") else ""
-        texto = str(valor or "").strip()
-        if texto:
-            return texto
-    return ""
-
 
 def inicializar_estado():
     if "inventario_df" not in st.session_state:

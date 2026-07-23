@@ -1,8 +1,8 @@
+# utils/lector_analizadores.py
 from pathlib import Path
 import re
 import pandas as pd
-
-RUTA_ANALIZADORES = Path(__file__).resolve().parent.parent / "datos" / "analizadores_bel.xlsx"
+from utils.rutas import RUTA_ANALIZADORES
 
 
 def cargar_analizadores(ruta=RUTA_ANALIZADORES):

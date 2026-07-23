@@ -1,3 +1,4 @@
+# pages/informacion del usuario.py
 import random
 
 import streamlit as st
