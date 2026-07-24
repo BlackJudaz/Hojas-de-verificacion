@@ -1,3 +1,4 @@
+# utils/google_drive.py
 import json
 import mimetypes
 import os
@@ -13,19 +14,22 @@ import zipfile
 from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
 
+from utils.rutas import (
+    RUTA_OAUTH_CONFIG as _OAUTH_CLIENT_CONFIG_PATH,
+    RUTA_OAUTH_TOKEN  as _OAUTH_TOKEN_PATH,
+    RUTA_STREAMLIT_SECRETS as _STREAMLIT_SECRETS_PATH,
+)
+from utils.fechas import normalizar_fecha
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
-_BASE_DIR = Path(__file__).resolve().parent.parent
-_OAUTH_CLIENT_CONFIG_PATH = _BASE_DIR / "datos" / "google_oauth_client.json"
-_OAUTH_TOKEN_PATH = _BASE_DIR / "datos" / "google_drive_token.json"
-_STREAMLIT_SECRETS_PATH = _BASE_DIR / ".streamlit" / "secrets.toml"
+_BASE_DIR              = Path(__file__).resolve().parent.parent
 _ENV_OAUTH_CLIENT_JSON = "GOOGLE_OAUTH_CLIENT_JSON"
 _ENV_OAUTH_CLIENT_PATH = "GOOGLE_OAUTH_CLIENT_PATH"
 _GOOGLE_SHEETS_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
-_EXCEL_XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_EXCEL_XLSX_MIME_TYPE    = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 _MESES = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -33,7 +37,7 @@ _MESES = [
 ]
 
 
-def _normalizar_fecha(valor, fecha_por_defecto):
+def normalizar_fecha(valor, fecha_por_defecto):
     if valor is None:
         return fecha_por_defecto
 
@@ -62,13 +66,13 @@ def _normalizar_fecha(valor, fecha_por_defecto):
 
 
 def resolver_fecha_referencia_drive(fechas_por_concepto=None, fecha_por_defecto=None):
-    fecha_base = _normalizar_fecha(fecha_por_defecto, datetime.now().date())
+    fecha_base = normalizar_fecha(fecha_por_defecto, datetime.now().date())
     if not isinstance(fechas_por_concepto, dict) or not fechas_por_concepto:
         return fecha_base, False
 
     fechas = []
     for valor in fechas_por_concepto.values():
-        fecha_normalizada = _normalizar_fecha(valor, None)
+        fecha_normalizada = normalizar_fecha(valor, None)
         if fecha_normalizada is not None:
             fechas.append(fecha_normalizada)
 
@@ -82,13 +86,13 @@ def resolver_fecha_referencia_drive(fechas_por_concepto=None, fecha_por_defecto=
 
 
 def formatear_nombre_carpeta_documentacion(fecha_mantenimiento):
-    fecha_normalizada = _normalizar_fecha(fecha_mantenimiento, datetime.now().date())
+    fecha_normalizada = normalizar_fecha(fecha_mantenimiento, datetime.now().date())
     mes = _MESES[fecha_normalizada.month - 1]
     return f"Documentación MP {mes} {fecha_normalizada.year}"
 
 
 def construir_ruta_documentacion(fecha_mantenimiento=None):
-    fecha_normalizada = _normalizar_fecha(fecha_mantenimiento, datetime.now().date())
+    fecha_normalizada = normalizar_fecha(fecha_mantenimiento, datetime.now().date())
     mes = _MESES[fecha_normalizada.month - 1]
     return ["Documentación MP", str(fecha_normalizada.year), mes]
 

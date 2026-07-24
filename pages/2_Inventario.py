@@ -1,3 +1,4 @@
+# pages/Inventario.py
 import streamlit as st
 from utils.lector_inventario import (
     cargar_inventario,

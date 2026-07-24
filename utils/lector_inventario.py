@@ -453,3 +453,14 @@ def aplicar_programacion_tinc(df_inventario, df_programacion):
                 df.at[idx, "URL TINC"] = url
 
     return df
+
+def normalizar_texto(valor):
+    """
+    Normaliza un texto eliminando acentos, convirtiendo a minúsculas
+    y colapsando espacios. Usado para búsquedas tolerantes a tildes.
+    """
+    texto = str(valor or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r"\s+", " ", texto)
+    return texto.strip()
