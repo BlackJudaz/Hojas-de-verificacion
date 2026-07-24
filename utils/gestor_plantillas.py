@@ -344,11 +344,29 @@ def _llenar_analizadores(ws, analizadores):
 # ── Imágenes ─────────────────────────────────────────────────────────────────
 
 def _copiar_imagenes_hoja(ws_origen, ws_destino):
+    from openpyxl.drawing.image import Image as OpenpyxlImage
+    from io import BytesIO
+    from PIL import Image as PILImage
+
     for imagen in getattr(ws_origen, "_images", []) or []:
         try:
-            imagen_copia = copy(imagen)
-            imagen_copia.anchor = copy(imagen.anchor) if hasattr(imagen, "anchor") else imagen.anchor
-            ws_destino.add_image(imagen_copia)
+            # Leer los bytes de la imagen antes de que el archivo se cierre
+            if hasattr(imagen, "ref") and imagen.ref is not None:
+                pil_img = PILImage.open(imagen.ref)
+                buffer = BytesIO()
+                pil_img.save(buffer, format=pil_img.format or "PNG")
+                buffer.seek(0)
+                nueva_imagen = OpenpyxlImage(buffer)
+            else:
+                continue
+
+            if hasattr(imagen, "anchor"):
+                try:
+                    nueva_imagen.anchor = copy(imagen.anchor)
+                except Exception:
+                    nueva_imagen.anchor = imagen.anchor
+
+            ws_destino.add_image(nueva_imagen)
         except Exception:
             continue
 
@@ -775,22 +793,27 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         c.drawCentredString(x + aw/2, y + ap * 0.22,
                             "Departamento de Ingenieria Biomedica de su Hospital")
 
-        y_fecha     = y + 1 * mm
+        # ── Sección fecha / próximo ──────────────────────────────────────────
+        y_fecha      = y + 1 * mm
         periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
-        fecha_etiqueta = resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base)
+        fecha_etiqueta  = resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base)
+        fecha_siguiente = calcular_siguiente_mantenimiento(fecha_etiqueta, periodicidad)
 
         c.setFillColorRGB(0, 0, 0)
-        c.setFont("Helvetica", fuente_campos)
-        c.drawString(x + 2*mm, y_fecha + 4*mm, "Fecha:")
-        c.line(x + 11*mm, y_fecha + 3.5*mm, x + 29*mm, y_fecha + 3.5*mm)
-        c.drawString(x + 11*mm, y_fecha + 4*mm, formato_mes_anio(fecha_etiqueta))
 
-        fecha_siguiente = calcular_siguiente_mantenimiento(fecha_etiqueta, periodicidad)
-        x_prox_label    = x + aw - 38 * mm
-        x_prox_date     = x + aw - 22 * mm
-        c.drawString(x_prox_label, y_fecha + 4*mm, "Próximo:")
-        c.line(x_prox_date - 8*mm, y_fecha + 3.5*mm, x + aw - 2*mm, y_fecha + 3.5*mm)
-        c.drawString(x_prox_date, y_fecha + 4*mm, formato_mes_anio(fecha_siguiente))
+        # Fecha — etiqueta centrada arriba, línea abajo, valor sobre la línea
+        c.setFont("Helvetica", fuente_campos - 1)
+        c.drawCentredString(x + 17*mm, y_fecha + 8*mm, "Fecha Mantenimineto:")
+        c.setFont("Helvetica", fuente_campos)
+        c.drawCentredString(x + 17*mm, y_fecha + 4.5*mm, formato_mes_anio(fecha_etiqueta))
+        c.line(x + 2*mm, y_fecha + 3.5*mm, x + 32*mm, y_fecha + 3.5*mm)
+
+        # Próximo — etiqueta centrada arriba, línea abajo, valor sobre la línea
+        c.setFont("Helvetica", fuente_campos - 1)
+        c.drawCentredString(x + aw - 17*mm, y_fecha + 8*mm, "Próximo Mantenimiento:")
+        c.setFont("Helvetica", fuente_campos)
+        c.drawCentredString(x + aw - 17*mm, y_fecha + 4.5*mm, formato_mes_anio(fecha_siguiente))
+        c.line(x + 35*mm, y_fecha + 3.5*mm, x + aw - 2*mm, y_fecha + 3.5*mm)
 
         ah_h   = alto_header
         y_head = y + ah - ah_h
@@ -842,7 +865,7 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         y_last_field = y_campos - (len(campos) - 1) * field_step
         y_title = y_last_field - 2*mm - field_step + (field_step / 2)
         y_name  = y_title - 3*mm
-        y_line  = y_name  - 2*mm
+        y_line  = y_name  - 0.5*mm
         c.setFont("Helvetica", fuente_campos)
         c.drawCentredString(x + aw/2, y_title, "Mantenimiento Preventivo realizado por:")
         c.setFont("Helvetica-Bold", fuente_campos)
