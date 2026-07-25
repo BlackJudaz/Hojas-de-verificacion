@@ -612,6 +612,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 return buffer_zip, [f"No se pudo abrir la plantilla base: {e}"], 0
 
             equipos_por_concepto = {}
+
             for idx, (_, row) in enumerate(equipos.iterrows()):
                 activo   = row.get("# ACTIVO", "SIN_ACTIVO")
                 concepto = row.get("CONCEPTO", "SIN_CONCEPTO")
@@ -619,14 +620,17 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 pestana = obtener_pestana(concepto)
 
                 if pestana is None:
-                    errores.append(f"El equipo {activo} ({concepto}) no tiene plantilla.")
+                    if concepto not in conceptos_sin_plantilla:
+                        conceptos_sin_plantilla.add(concepto)
+                        errores.append(f"{concepto} no tiene una lista de verificación asignada.")
                     progress_bar.progress((idx + 1) / len(equipos))
                     continue
                 if pestana not in pestañas_base:
-                    errores.append(f"El equipo {activo} ({concepto}) apunta a '{pestana}' que no existe.")
+                    if concepto not in conceptos_pestana_faltante:
+                        conceptos_pestana_faltante.add(concepto)
+                        errores.append(f"El tipo de activo {concepto} apunta a '{pestana}' que no existe.")
                     progress_bar.progress((idx + 1) / len(equipos))
                     continue
-
                 equipos_por_concepto.setdefault(concepto, {"pestana": pestana, "equipos": []})
                 equipos_por_concepto[concepto]["equipos"].append(row.to_dict())
                 progress_bar.progress((idx + 1) / len(equipos))
