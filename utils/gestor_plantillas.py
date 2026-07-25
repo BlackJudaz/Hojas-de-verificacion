@@ -222,6 +222,29 @@ def _buscar_y_escribir_firmas_por_texto(ws, ingeniero, jefe):
         pass
 
 
+def _escribir_tiempo_procedimiento(ws, tiempo_mantenimiento):
+    """Escribe el tiempo de mantenimiento en la hoja si encuentra una etiqueta compatible."""
+    tiempo_texto = str(tiempo_mantenimiento or "").strip()
+    if not tiempo_texto:
+        return False
+
+    etiquetas = [
+        "tiempo de mantenimiento",
+        "tiempo mantenimiento",
+        "tiempo de procedimiento",
+        "tiempo procedimiento",
+        "duracion de mantenimiento",
+        "duracion del mantenimiento",
+        "duracion de procedimiento",
+        "duracion del procedimiento",
+    ]
+
+    for etiqueta in etiquetas:
+        if _buscar_etiqueta_y_escribir(ws, etiqueta, tiempo_texto, usar_celda_derecha=True):
+            return True
+    return False
+
+
 def _buscar_y_escribir_folio_por_texto(ws, folio, url=None):
     """Escribe el folio TiNC en la celda a la derecha de la etiqueta FOLIO."""
     folio_texto = str(folio or "").strip()
@@ -523,6 +546,8 @@ def _llenar_hoja_verificacion(ws, equipo, ingeniero, jefe, hospital, nombre_plan
     ws["AA14"] = equipo.get("No. DE SERIE", "")
     _quitar_negritas_celda(ws["AA14"])
 
+    _escribir_tiempo_procedimiento(ws, equipo.get("TIEMPO MANTENIMIENTO", ""))
+
     _buscar_y_escribir_firmas_por_texto(ws, ingeniero, jefe)
 
     ing_cell, jefe_cell = _obtener_celdas_firma_por_pestana(nombre_plantilla)
@@ -597,11 +622,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
     if analizadores_seleccionados is None:
         analizadores_seleccionados = []
 
-    nombre_carpeta = _normalizar_nombre_archivo(nombre_carpeta) or "paquete"
-
     with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        zip_file.writestr(f"{nombre_carpeta}/", "")
-
         if hacer_hojas:
             try:
                 wb_base       = load_workbook(RUTA_PLANTILLAS)
@@ -612,6 +633,8 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 return buffer_zip, [f"No se pudo abrir la plantilla base: {e}"], 0
 
             equipos_por_concepto = {}
+            conceptos_sin_plantilla = set()
+            conceptos_pestana_faltante = set()
 
             for idx, (_, row) in enumerate(equipos.iterrows()):
                 activo   = row.get("# ACTIVO", "SIN_ACTIVO")
@@ -642,8 +665,6 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                     continue
 
                 tipo_equipo    = _normalizar_nombre_archivo(str(concepto or "SIN_TIPO_ACTIVO"))
-                carpeta_equipo = f"{nombre_carpeta}/{tipo_equipo}"
-                zip_file.writestr(f"{carpeta_equipo}/", "")
 
                 try:
                     wb_concepto = load_workbook(RUTA_PLANTILLAS)
@@ -654,8 +675,6 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 hojas_plantilla        = list(wb_concepto.sheetnames)
                 nombres_usados         = set(wb_concepto.sheetnames)
                 hojas_generadas        = []
-                periodicidades         = []
-                tiempos                = []
 
                 for equipo_dict in lista_equipos:
                     activo_equipo = equipo_dict.get("# ACTIVO", "SIN_ACTIVO")
@@ -671,11 +690,6 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                         )
                         hojas_generadas.append(ws_equipo.title)
                         exitos += 1
-
-                        if p := str(equipo_dict.get("PERIODICIDAD", "")).strip():
-                            periodicidades.append(p)
-                        if t := str(equipo_dict.get("TIEMPO MANTENIMIENTO", "")).strip():
-                            tiempos.append(t)
                     except Exception as e:
                         errores.append(f"Error en {activo_equipo}: {e}")
 
@@ -683,17 +697,6 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                     for hoja in hojas_plantilla:
                         if hoja in wb_concepto.sheetnames:
                             del wb_concepto[hoja]
-
-                    periodicidades_unicas = list(dict.fromkeys(periodicidades))
-                    tiempos_unicos        = list(dict.fromkeys(tiempos))
-                    zip_file.writestr(
-                        f"{carpeta_equipo}/datos_mantenimiento.txt",
-                        "\n".join([
-                            f"Concepto: {concepto}",
-                            f"Periodicidad: {', '.join(periodicidades_unicas) or 'No definida'}",
-                            f"Tiempo de mantenimiento: {', '.join(tiempos_unicos) or 'No capturado'}",
-                        ])
-                    )
 
                     nombre_excel = f"{tipo_equipo}.xlsx"
                     os.makedirs(RUTA_REPORTES, exist_ok=True)
@@ -705,7 +708,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                         sufijo += 1
 
                     wb_concepto.save(ruta_concepto)
-                    zip_file.write(ruta_concepto, arcname=f"{carpeta_equipo}/{nombre_excel}")
+                    zip_file.write(ruta_concepto, arcname=nombre_excel)
                     if os.path.exists(ruta_concepto):
                         os.remove(ruta_concepto)
 
@@ -719,7 +722,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
             ruta_pdf = crear_etiquetas_pdf(equipos, ingeniero,
                                            fecha_mantenimiento_base=fecha_mantenimiento_base)
             if os.path.exists(ruta_pdf):
-                zip_file.write(ruta_pdf, arcname=f"{nombre_carpeta}/etiquetas_mantenimiento.pdf")
+                zip_file.write(ruta_pdf, arcname="etiquetas_mantenimiento.pdf")
                 os.remove(ruta_pdf)
 
         status_text.empty()
@@ -777,7 +780,9 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
     fila_actual = 0
     fecha_hoy   = date.today()
 
-    for _, row in equipos.iterrows():
+    def _dibujar_etiqueta_en_posicion(row=None):
+        nonlocal col_actual, fila_actual
+
         x  = margen_x + col_actual * (ancho_etiqueta + espacio_col)
         y  = alto_pagina - margen_y - alto_etiqueta - fila_actual * (alto_etiqueta + espacio_fila)
         aw = ancho_etiqueta
@@ -799,9 +804,15 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
 
         # ── Sección fecha / próximo ──────────────────────────────────────────
         y_fecha      = y + 1 * mm
-        periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
-        fecha_etiqueta  = resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base)
-        fecha_siguiente = calcular_siguiente_mantenimiento(fecha_etiqueta, periodicidad)
+        fecha_etiqueta = ""
+        fecha_siguiente = ""
+        if row is not None:
+            periodicidad = str(row.get("PERIODICIDAD", "Anual")).strip()
+            fecha_base = resolver_fecha_base_por_equipo(row, fecha_hoy, fecha_mantenimiento_base)
+            fecha_etiqueta = formato_mes_anio(fecha_base)
+            fecha_siguiente = formato_mes_anio(
+                calcular_siguiente_mantenimiento(fecha_base, periodicidad)
+            )
 
         c.setFillColorRGB(0, 0, 0)
 
@@ -809,14 +820,14 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         c.setFont("Helvetica", fuente_campos - 1)
         c.drawCentredString(x + 17*mm, y_fecha + 8*mm, "Fecha Mantenimineto:")
         c.setFont("Helvetica", fuente_campos)
-        c.drawCentredString(x + 17*mm, y_fecha + 4.5*mm, formato_mes_anio(fecha_etiqueta))
+        c.drawCentredString(x + 17*mm, y_fecha + 4.5*mm, fecha_etiqueta)
         c.line(x + 2*mm, y_fecha + 3.5*mm, x + 32*mm, y_fecha + 3.5*mm)
 
         # Próximo — etiqueta centrada arriba, línea abajo, valor sobre la línea
         c.setFont("Helvetica", fuente_campos - 1)
         c.drawCentredString(x + aw - 17*mm, y_fecha + 8*mm, "Próximo Mantenimiento:")
         c.setFont("Helvetica", fuente_campos)
-        c.drawCentredString(x + aw - 17*mm, y_fecha + 4.5*mm, formato_mes_anio(fecha_siguiente))
+        c.drawCentredString(x + aw - 17*mm, y_fecha + 4.5*mm, fecha_siguiente)
         c.line(x + 35*mm, y_fecha + 3.5*mm, x + aw - 2*mm, y_fecha + 3.5*mm)
 
         ah_h   = alto_header
@@ -842,12 +853,12 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         c.drawRightString(x + aw - 1*mm, y_head + ah_h * 0.15, "018000051015")
 
         campos = [
-            ("Equipo",         str(row.get("CONCEPTO", ""))),
-            ("Marca",          str(row.get("MARCA", ""))),
-            ("Modelo",         str(row.get("MODELO", ""))),
-            ("No. Serie",      str(row.get("No. DE SERIE", ""))),
-            ("No. Inventario", str(row.get("# ACTIVO", ""))),
-            ("Area",           _construir_ubicacion_sububicacion(row)),
+            ("Equipo",         str(row.get("CONCEPTO", "")) if row is not None else ""),
+            ("Marca",          str(row.get("MARCA", "")) if row is not None else ""),
+            ("Modelo",         str(row.get("MODELO", "")) if row is not None else ""),
+            ("No. Serie",      str(row.get("No. DE SERIE", "")) if row is not None else ""),
+            ("No. Inventario", str(row.get("# ACTIVO", "")) if row is not None else ""),
+            ("Area",           _construir_ubicacion_sububicacion(row) if row is not None else ""),
         ]
 
         field_step = 3 * mm
@@ -873,7 +884,7 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
         c.setFont("Helvetica", fuente_campos)
         c.drawCentredString(x + aw/2, y_title, "Mantenimiento Preventivo realizado por:")
         c.setFont("Helvetica-Bold", fuente_campos)
-        c.drawCentredString(x + aw/2, y_name, ingeniero or "")
+        c.drawCentredString(x + aw/2, y_name, (ingeniero or "") if row is not None else "")
         c.setLineWidth(0.5)
         c.line(x + 3*mm, y_line, x + aw - 3*mm, y_line)
 
@@ -885,6 +896,14 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
             fila_actual = 0
             col_actual  = 0
             c.showPage()
+
+    for _, row in equipos.iterrows():
+        _dibujar_etiqueta_en_posicion(row)
+
+    # Completa la ultima pagina con etiquetas en blanco para no desperdiciar la hoja.
+    if col_actual != 0 or fila_actual != 0:
+        while col_actual != 0 or fila_actual != 0:
+            _dibujar_etiqueta_en_posicion(None)
 
     c.save()
     return RUTA_PDF

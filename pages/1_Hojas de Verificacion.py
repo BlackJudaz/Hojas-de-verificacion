@@ -29,12 +29,19 @@ config = {
 }
 
 MAX_ANALIZADORES = 3
+COLUMNA_ID = "# ACTIVO"
+
+
+@st.cache_data(show_spinner=False)
+def _cargar_analizadores_cached():
+    return cargar_analizadores()
 
 
 def inicializar_estado():
     defaults = {
         "inventario_df":                    None,
         "clic_buscar":                      False,
+        "ids_equipos_seleccionados":        [],
         "analizadores_seleccionados":       [],
         "periodicidad_por_concepto":        {},
         "tiempo_mantenimiento_por_concepto":{},
@@ -52,6 +59,9 @@ def inicializar_estado():
         "filtro_marca":                     [],
         "filtro_activo":                    [],
         "filtro_ubicacion":                 [],
+        "_selector_reset_token":            0,
+        "_selector_sincronizar_visual":     False,
+        "_selector_limpiar_visual":         False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -65,6 +75,10 @@ def limpiar_filtros():
     st.session_state.filtro_marca            = []
     st.session_state.filtro_activo           = []
     st.session_state.filtro_ubicacion        = []
+    st.session_state.pop("_selector_cache_clave", None)
+    st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_sincronizar_visual"] = False
+    st.session_state["_selector_limpiar_visual"] = False
 
 
 def _clave(concepto):
@@ -88,7 +102,7 @@ if st.session_state.inventario_df is None:
     st.info("Por favor, ve a la sección 'Inventario' en el menú lateral antes de continuar.")
     st.stop()
 
-analizadores_df = cargar_analizadores()
+analizadores_df = _cargar_analizadores_cached()
 df = st.session_state.inventario_df
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -175,34 +189,136 @@ filtros = {
     "# ACTIVO":  st.session_state.filtro_activo,
     "UBICACIÓN": st.session_state.filtro_ubicacion,
 }
-df_final = aplicar_filtros(df, filtros)
+clave_filtros = "|".join([
+    ",".join(sorted(st.session_state.filtro_concepto)),
+    ",".join(sorted(st.session_state.filtro_marca)),
+    ",".join(sorted(st.session_state.filtro_activo)),
+    ",".join(sorted(st.session_state.filtro_ubicacion)),
+])
 
 columnas_mostrar = [
     c for c in ["# ACTIVO", "CONCEPTO", "MARCA", "MODELO", "UBICACIÓN", "SUB UBICACIÓN"]
     if c in df.columns
 ]
 
-with st.container(border=True):
-    st.markdown("### 2. Selecciona los equipos")
-    st.caption("Marca una o varias filas para preparar sus hojas de verificación y etiquetas.")
-    seleccion_tabla = st.dataframe(
-        df_final[columnas_mostrar],
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="multi-row",
-    )
 
-    filas_seleccionadas = seleccion_tabla.get("selection", {}).get("rows", [])
+if st.session_state.get("_selector_cache_clave") != clave_filtros:
+    ids_previos_cache = set(st.session_state.ids_equipos_seleccionados)
+    df_filtrado = aplicar_filtros(df, filtros)
 
-    if not filas_seleccionadas:
-        st.info("Selecciona uno o varios equipos de la tabla para continuar.")
-        st.stop()
+    # Mantiene visibles seleccionados y los coloca al final para no romper el flujo al ampliar filtros.
+    mask_sel_filtrado = df_filtrado[COLUMNA_ID].astype(str).isin(ids_previos_cache)
+    df_filtrado_no_sel = df_filtrado[~mask_sel_filtrado]
+    df_sel = df[df[COLUMNA_ID].astype(str).isin(ids_previos_cache)]
+    df_mostrar = pd.concat([df_filtrado_no_sel, df_sel], ignore_index=True)
+    df_mostrar = df_mostrar.drop_duplicates(subset=[COLUMNA_ID], keep="first")
 
-    equipos_a_mantener       = df_final.iloc[filas_seleccionadas].copy()
-    conceptos_seleccionados  = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
+    st.session_state["_selector_cache_clave"] = clave_filtros
+    st.session_state["_selector_df_base"] = df_mostrar[columnas_mostrar].copy()
+    st.session_state["_selector_sincronizar_visual"] = True
 
-    st.success(f"Se seleccionaron {len(equipos_a_mantener)} equipos")
+
+def _render_selector_equipos(columnas):
+    with st.container(border=True):
+        st.markdown("### 2. Selecciona los equipos")
+        st.caption(
+            "Marca los equipos a trabajar. Usa el selector del encabezado para seleccionar todos los visibles."
+        )
+        st.caption(
+            "Si cambias filtros, los equipos ya seleccionados que no coincidan se mostraran al final y conservaran su seleccion."
+        )
+
+        ids_previos = set(st.session_state.ids_equipos_seleccionados)
+        df_base_tabla = st.session_state.get("_selector_df_base")
+        if df_base_tabla is None:
+            st.info("Aplica los filtros para cargar la tabla de equipos.")
+            st.stop()
+
+        clave_df = f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}"
+
+        # Rehidrata seleccion por ID (no por posicion de fila) cuando cambia el filtro.
+        if st.session_state.get("_selector_sincronizar_visual", False):
+            filas_preseleccionadas = [
+                idx for idx, valor in enumerate(df_base_tabla[COLUMNA_ID].astype(str).tolist())
+                if valor in ids_previos
+            ]
+            st.session_state[clave_df] = {
+                "selection": {
+                    "rows": filas_preseleccionadas,
+                    "columns": [],
+                    "cells": [],
+                }
+            }
+            st.session_state["_selector_sincronizar_visual"] = False
+
+        if st.session_state.get("_selector_limpiar_visual", False):
+            st.session_state[clave_df] = {
+                "selection": {
+                    "rows": [],
+                    "columns": [],
+                    "cells": [],
+                }
+            }
+            st.session_state["_selector_limpiar_visual"] = False
+
+        seleccion_tabla = st.dataframe(
+            df_base_tabla,
+            use_container_width=True,
+            hide_index=True,
+            key=clave_df,
+            on_select="rerun",
+            selection_mode="multi-row",
+        )
+
+        ids_en_tabla = set(df_base_tabla[COLUMNA_ID].astype(str))
+        filas = seleccion_tabla.get("selection", {}).get("rows", [])
+        filas_validas = [
+            i for i in filas
+            if isinstance(i, int) and 0 <= i < len(df_base_tabla)
+        ]
+
+        # Si Streamlit devuelve indices desfasados (p.ej. tras ordenar A-Z),
+        # evitamos romper el flujo y conservamos la seleccion vigente en tabla.
+        if filas and not filas_validas:
+            ids_seleccionados_tabla = ids_previos & ids_en_tabla
+            st.session_state["_selector_sincronizar_visual"] = True
+        else:
+            ids_seleccionados_tabla = set(
+                df_base_tabla.iloc[filas_validas][COLUMNA_ID].astype(str)
+            ) if filas_validas else set()
+
+        ids_finales = (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
+        st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
+
+        col_info, col_borrar = st.columns([10, 2])
+        with col_borrar:
+            if st.button("Borrar selección", use_container_width=True):
+                st.session_state.ids_equipos_seleccionados = []
+                st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+                st.session_state["_selector_limpiar_visual"] = False
+                st.session_state["_selector_sincronizar_visual"] = False
+                # Fuerza reconstruccion de la tabla con los filtros actuales,
+                # sin filas arrastradas por seleccion previa.
+                st.session_state.pop("_selector_cache_clave", None)
+                st.session_state.pop("_selector_df_base", None)
+                st.rerun()
+
+        with col_info:
+            total = len(st.session_state.ids_equipos_seleccionados)
+            if total:
+                st.success(f"Se seleccionaron {total} equipos")
+            else:
+                st.info("Selecciona uno o varios equipos de la tabla para continuar.")
+
+
+_render_selector_equipos(columnas_mostrar)
+
+ids_finales = set(st.session_state.ids_equipos_seleccionados)
+if not ids_finales:
+    st.stop()
+
+equipos_a_mantener = df[df[COLUMNA_ID].astype(str).isin(ids_finales)].copy()
+conceptos_seleccionados = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 3 — Configurar información

@@ -23,6 +23,7 @@ def _resetear_estado_inventario():
     st.session_state.fecha_mantenimiento_por_concepto   = {}
     st.session_state.programacion_tinc_texto            = ""
     st.session_state.programacion_tinc_df               = None
+    st.session_state.usar_programacion_tinc             = "No"
 
 
 def _guardar_informacion_usuario():
@@ -35,6 +36,7 @@ def _guardar_informacion_usuario():
 for key, default in {
     "programacion_tinc_texto": "",
     "programacion_tinc_df":    None,
+    "usar_programacion_tinc":  "No",
     "input_nombre_ingeniero":  st.session_state.get("nombre_ingeniero", ""),
     "input_nombre_jefe":       st.session_state.get("nombre_jefe",      ""),
     "input_nombre_hospital":   st.session_state.get("nombre_hospital",  ""),
@@ -146,24 +148,32 @@ with st.container(border=True):
     st.markdown("### 3. Agregar Inventario de TiNC")
     st.caption("Con el inventario de TiNC las hojas de Verificación relacionadas al equipo tendrán el Folio de TiNC.")
 
-    texto_programacion = st.text_area(
-        label="Programación TiNC",
-        key="programacion_tinc_texto",
-        height=200,
-        placeholder="Pega aquí manualmente el contenido de la programación del mes.",
-        label_visibility="collapsed",
+    st.radio(
+        "¿Deseas agregar la programación de TiNC?",
+        options=["No", "Sí"],
+        key="usar_programacion_tinc",
+        horizontal=True,
     )
 
-    if st.button("Guardar programación TINC", type="primary", use_container_width=True):
-        if st.session_state.inventario_df is not None:
-            df_prog = parsear_programacion_tinc(texto_programacion)
-            st.session_state.programacion_tinc_df  = df_prog
-            st.session_state.inventario_df = aplicar_programacion_tinc(
-                st.session_state.inventario_df, df_prog
-            )
-            st.rerun()
-        else:
-            st.warning("Primero sube el inventario en el paso 1.")
+    if st.session_state.usar_programacion_tinc == "Sí":
+        texto_programacion = st.text_area(
+            label="Programación TiNC",
+            key="programacion_tinc_texto",
+            height=200,
+            placeholder="Pega aquí manualmente el contenido de la programación del mes.",
+            label_visibility="collapsed",
+        )
+
+        if st.button("Guardar programación TINC", type="primary", use_container_width=True):
+            if st.session_state.inventario_df is not None:
+                df_prog = parsear_programacion_tinc(texto_programacion)
+                st.session_state.programacion_tinc_df  = df_prog
+                st.session_state.inventario_df = aplicar_programacion_tinc(
+                    st.session_state.inventario_df, df_prog
+                )
+                st.rerun()
+            else:
+                st.warning("Primero sube el inventario en el paso 1.")
 
     # Tabla de emparejamiento
     if st.session_state.inventario_df is not None:
