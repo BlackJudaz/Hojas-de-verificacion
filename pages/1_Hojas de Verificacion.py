@@ -193,16 +193,16 @@ with st.container(border=True):
         selection_mode="multi-row",
     )
 
-filas_seleccionadas = seleccion_tabla.get("selection", {}).get("rows", [])
+    filas_seleccionadas = seleccion_tabla.get("selection", {}).get("rows", [])
 
-if not filas_seleccionadas:
-    st.info("Selecciona uno o varios equipos de la tabla para continuar.")
-    st.stop()
+    if not filas_seleccionadas:
+        st.info("Selecciona uno o varios equipos de la tabla para continuar.")
+        st.stop()
 
-equipos_a_mantener       = df_final.iloc[filas_seleccionadas].copy()
-conceptos_seleccionados  = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
+    equipos_a_mantener       = df_final.iloc[filas_seleccionadas].copy()
+    conceptos_seleccionados  = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
 
-st.success(f"Se seleccionaron {len(equipos_a_mantener)} equipos")
+    st.success(f"Se seleccionaron {len(equipos_a_mantener)} equipos")
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 3 — Configurar información
