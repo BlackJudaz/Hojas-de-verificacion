@@ -62,6 +62,8 @@ def inicializar_estado():
         "_selector_reset_token":            0,
         "_selector_sincronizar_visual":     False,
         "_selector_limpiar_visual":         False,
+        "_selector_ids_visibles":           [],
+        "_selector_df_editor":             None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -77,8 +79,10 @@ def limpiar_filtros():
     st.session_state.filtro_ubicacion        = []
     st.session_state.pop("_selector_cache_clave", None)
     st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_df_editor"] = None
     st.session_state["_selector_sincronizar_visual"] = False
     st.session_state["_selector_limpiar_visual"] = False
+    st.session_state["_selector_ids_visibles"] = []
 
 
 def _clave(concepto):
@@ -89,6 +93,30 @@ def _total_analizadores(concepto):
     bel     = [x for x in st.session_state.analizadores_bel_por_concepto.get(concepto, []) if x]
     propios = st.session_state.analizadores_propios_por_concepto.get(concepto, [])
     return len(bel) + len(propios)
+
+
+def _toggle_seleccionar_todo_visible(toggle_key):
+    df_editor = st.session_state.get("_selector_df_editor")
+    if df_editor is None or "SELECCIONAR" not in df_editor.columns:
+        return
+
+    marcar_todo = bool(st.session_state.get(toggle_key, False))
+    df_editor = df_editor.copy()
+    df_editor["SELECCIONAR"] = marcar_todo
+    st.session_state["_selector_df_editor"] = df_editor
+
+    ids_en_tabla = set(df_editor[COLUMNA_ID].astype(str))
+    ids_previos = set(st.session_state.ids_equipos_seleccionados)
+    ids_seleccionados_tabla = set(
+        df_editor.loc[df_editor["SELECCIONAR"], COLUMNA_ID].astype(str)
+    )
+    st.session_state.ids_equipos_seleccionados = sorted(
+        (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
+    )
+
+    # Fuerza remontaje del editor para que el estado visual de casillas se actualice al instante.
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+    st.rerun()
 
 
 # ── Inicio de la página ──────────────────────────────────────────────────────
@@ -108,9 +136,10 @@ df = st.session_state.inventario_df
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 1 — Filtrar
 # ════════════════════════════════════════════════════════════════════════════
-with st.container(border=True):
-    st.markdown("### 1. Filtra los equipos")
-    st.caption("Puedes filtrar por tipo de activo, marca, número de activo o ubicación.")
+main_card = st.container(border=True)
+with main_card:
+    st.markdown("### 1. Filtra y selecciona los equipos")
+    st.caption("Primero filtra por tipo de activo, marca, número de activo o ubicación; luego selecciona en la misma vista.")
 
     col_filtros, col_acciones = st.columns([8, 2])
     with col_filtros:
@@ -204,29 +233,38 @@ columnas_mostrar = [
 
 if st.session_state.get("_selector_cache_clave") != clave_filtros:
     ids_previos_cache = set(st.session_state.ids_equipos_seleccionados)
+    ids_visibles_previos = set(st.session_state.get("_selector_ids_visibles", []))
+    # Solo arrastrar seleccionados que estaban en la tabla visible previa.
+    ids_arrastrables = ids_previos_cache & ids_visibles_previos if ids_visibles_previos else ids_previos_cache
     df_filtrado = aplicar_filtros(df, filtros)
 
     # Mantiene visibles seleccionados y los coloca al final para no romper el flujo al ampliar filtros.
-    mask_sel_filtrado = df_filtrado[COLUMNA_ID].astype(str).isin(ids_previos_cache)
+    mask_sel_filtrado = df_filtrado[COLUMNA_ID].astype(str).isin(ids_arrastrables)
     df_filtrado_no_sel = df_filtrado[~mask_sel_filtrado]
-    df_sel = df[df[COLUMNA_ID].astype(str).isin(ids_previos_cache)]
+    df_sel = df[df[COLUMNA_ID].astype(str).isin(ids_arrastrables)]
     df_mostrar = pd.concat([df_filtrado_no_sel, df_sel], ignore_index=True)
     df_mostrar = df_mostrar.drop_duplicates(subset=[COLUMNA_ID], keep="first")
+    df_editor = df_mostrar[columnas_mostrar].copy()
+    df_editor.insert(
+        0,
+        "SELECCIONAR",
+        df_editor[COLUMNA_ID].astype(str).isin(ids_previos_cache),
+    )
 
     st.session_state["_selector_cache_clave"] = clave_filtros
     st.session_state["_selector_df_base"] = df_mostrar[columnas_mostrar].copy()
-    st.session_state["_selector_sincronizar_visual"] = True
+    st.session_state["_selector_df_editor"] = df_editor
 
 
 def _render_selector_equipos(columnas):
-    with st.container(border=True):
-        st.markdown("### 2. Selecciona los equipos")
-        st.caption(
-            "Marca los equipos a trabajar. Usa el selector del encabezado para seleccionar todos los visibles."
-        )
-        st.caption(
-            "Si cambias filtros, los equipos ya seleccionados que no coincidan se mostraran al final y conservaran su seleccion."
-        )
+    with st.container(border=False):
+    #    st.markdown("#### Selecciona los equipos")
+     #   st.caption(
+      #      "Marca los equipos a trabajar usando las casillas de la tabla."
+       # )
+       # st.caption(
+       #     "Si cambias filtros, los equipos ya seleccionados que no coincidan se mostraran al final y conservaran su seleccion."
+       # )
 
         ids_previos = set(st.session_state.ids_equipos_seleccionados)
         df_base_tabla = st.session_state.get("_selector_df_base")
@@ -235,60 +273,56 @@ def _render_selector_equipos(columnas):
             st.stop()
 
         clave_df = f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}"
+        df_tabla = st.session_state.get("_selector_df_editor")
+        if df_tabla is None:
+            df_tabla = df_base_tabla.copy()
+            df_tabla.insert(
+                0,
+                "SELECCIONAR",
+                df_tabla[COLUMNA_ID].astype(str).isin(ids_previos),
+            )
+            st.session_state["_selector_df_editor"] = df_tabla.copy()
 
-        # Rehidrata seleccion por ID (no por posicion de fila) cuando cambia el filtro.
-        if st.session_state.get("_selector_sincronizar_visual", False):
-            filas_preseleccionadas = [
-                idx for idx, valor in enumerate(df_base_tabla[COLUMNA_ID].astype(str).tolist())
-                if valor in ids_previos
-            ]
-            st.session_state[clave_df] = {
-                "selection": {
-                    "rows": filas_preseleccionadas,
-                    "columns": [],
-                    "cells": [],
-                }
-            }
-            st.session_state["_selector_sincronizar_visual"] = False
-
-        if st.session_state.get("_selector_limpiar_visual", False):
-            st.session_state[clave_df] = {
-                "selection": {
-                    "rows": [],
-                    "columns": [],
-                    "cells": [],
-                }
-            }
-            st.session_state["_selector_limpiar_visual"] = False
-
-        seleccion_tabla = st.dataframe(
-            df_base_tabla,
-            use_container_width=True,
-            hide_index=True,
-            key=clave_df,
-            on_select="rerun",
-            selection_mode="multi-row",
+        toggle_all_key = f"selector_toggle_all_{st.session_state.get('_selector_reset_token', 0)}"
+        st.session_state[toggle_all_key] = bool(df_tabla["SELECCIONAR"].all())
+        st.checkbox(
+            "Seleccionar todo lo visible",
+            key=toggle_all_key,
+            help="Marca todo lo visible; si lo desmarcas, se deselecciona todo lo visible.",
+            on_change=_toggle_seleccionar_todo_visible,
+            args=(toggle_all_key,),
         )
 
+        with st.form(key=f"selector_form_{st.session_state.get('_selector_reset_token', 0)}"):
+            tabla_editada = st.data_editor(
+                df_tabla,
+                use_container_width=True,
+                hide_index=True,
+                key=clave_df,
+                column_config={
+                    "SELECCIONAR": st.column_config.CheckboxColumn(
+                        "Seleccionar",
+                        help="Marca los equipos a trabajar",
+                    )
+                },
+                disabled=[col for col in df_tabla.columns if col != "SELECCIONAR"],
+            )
+            aplicar_seleccion = st.form_submit_button(
+                "Aplicar selección",
+                type="primary",
+                use_container_width=True,
+            )
+
         ids_en_tabla = set(df_base_tabla[COLUMNA_ID].astype(str))
-        filas = seleccion_tabla.get("selection", {}).get("rows", [])
-        filas_validas = [
-            i for i in filas
-            if isinstance(i, int) and 0 <= i < len(df_base_tabla)
-        ]
-
-        # Si Streamlit devuelve indices desfasados (p.ej. tras ordenar A-Z),
-        # evitamos romper el flujo y conservamos la seleccion vigente en tabla.
-        if filas and not filas_validas:
-            ids_seleccionados_tabla = ids_previos & ids_en_tabla
-            st.session_state["_selector_sincronizar_visual"] = True
-        else:
+        st.session_state["_selector_ids_visibles"] = sorted(ids_en_tabla)
+        if aplicar_seleccion:
+            st.session_state["_selector_df_editor"] = tabla_editada.copy()
             ids_seleccionados_tabla = set(
-                df_base_tabla.iloc[filas_validas][COLUMNA_ID].astype(str)
-            ) if filas_validas else set()
-
-        ids_finales = (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
-        st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
+                tabla_editada.loc[tabla_editada["SELECCIONAR"], COLUMNA_ID].astype(str)
+            )
+            ids_finales = (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
+            st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
+            st.rerun()
 
         col_info, col_borrar = st.columns([10, 2])
         with col_borrar:
@@ -301,6 +335,7 @@ def _render_selector_equipos(columnas):
                 # sin filas arrastradas por seleccion previa.
                 st.session_state.pop("_selector_cache_clave", None)
                 st.session_state.pop("_selector_df_base", None)
+                st.session_state["_selector_df_editor"] = None
                 st.rerun()
 
         with col_info:
@@ -311,7 +346,8 @@ def _render_selector_equipos(columnas):
                 st.info("Selecciona uno o varios equipos de la tabla para continuar.")
 
 
-_render_selector_equipos(columnas_mostrar)
+with main_card:
+    _render_selector_equipos(columnas_mostrar)
 
 ids_finales = set(st.session_state.ids_equipos_seleccionados)
 if not ids_finales:
