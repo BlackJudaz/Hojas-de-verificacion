@@ -456,11 +456,6 @@ with st.container(border=True):
                 st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
                 st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
 
-            if errores:
-                with st.expander("Detalles de advertencias u omisiones"):
-                    for err in errores:
-                        st.warning(err)
-
             st.download_button(
                 label               = "⬇️ Descargar Paquete (.zip)",
                 data                = contenido_zip,
