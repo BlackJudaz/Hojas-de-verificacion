@@ -224,15 +224,67 @@ def cargar_client_config_local():
 
 
 def autorizar_google_drive(client_config):
-    from google_auth_oauthlib.flow import InstalledAppFlow
+    """
+    Flujo OAuth compatible con Streamlit Cloud.
+    Usa redirect URI en lugar de servidor local.
+    """
+    from google_auth_oauthlib.flow import Flow
+    import streamlit as st
 
-    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-    credentials = flow.run_local_server(
-        port=0,
-        open_browser=True,
-        authorization_prompt_message="Abre este enlace para autorizar la conexión con Google Drive: {url}",
-        success_message="Autorización completada. Puedes cerrar esta pestaña y volver a la aplicación."
+    # Detectar si estamos en la nube o en local
+    redirect_uri = _detectar_redirect_uri()
+
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=SCOPES,
+        redirect_uri=redirect_uri,
     )
+
+    # Paso 1 — generar URL de autorización
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+
+    # Guardar state y flow en session para verificar después
+    st.session_state["google_oauth_state"] = state
+    st.session_state["google_oauth_flow_config"] = {
+        "client_config": client_config,
+        "redirect_uri": redirect_uri,
+    }
+
+    return auth_url, flow
+
+
+def _detectar_redirect_uri():
+    """Detecta si la app corre en Streamlit Cloud o en local."""
+    try:
+        import streamlit as st
+        # En Streamlit Cloud existe la variable HOSTNAME
+        hostname = st.context.headers.get("host", "localhost:8501")
+        if "localhost" in hostname or "127.0.0.1" in hostname:
+            return "http://localhost:8501"
+        return f"https://{hostname}"
+    except Exception:
+        return "http://localhost:8501"
+
+
+def intercambiar_codigo_por_credenciales(code, state, flow_config):
+    """
+    Intercambia el código de autorización por credenciales.
+    Se llama después de que Google redirige de vuelta a la app.
+    """
+    from google_auth_oauthlib.flow import Flow
+
+    flow = Flow.from_client_config(
+        flow_config["client_config"],
+        scopes=SCOPES,
+        redirect_uri=flow_config["redirect_uri"],
+        state=state,
+    )
+    flow.fetch_token(code=code)
+    credentials = flow.credentials
     return json.loads(credentials.to_json())
 
 
