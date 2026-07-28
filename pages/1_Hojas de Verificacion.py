@@ -78,7 +78,7 @@ def _total_analizadores(concepto):
 
 
 # ── Inicio de la página ──────────────────────────────────────────────────────
-st.title("prueba de funcionamiento")
+st.title("Generador de Hojas de Verificación y Etiquetas")
 st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
 
 inicializar_estado()
