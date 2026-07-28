@@ -399,6 +399,104 @@ st.session_state.analizadores_seleccionados   = list(dict.fromkeys(analizadores_
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 4 — Descargar documentación
 # ════════════════════════════════════════════════════════════════════════════
+
+def _subir_a_drive(contenido_zip):
+    from utils import google_drive
+
+    periodo_iso = st.session_state.get("ultimo_paquete_periodo", "")
+    credenciales = st.session_state.get("google_drive_credentials")
+
+    try:
+        fecha_periodo = datetime.fromisoformat(periodo_iso).date() if periodo_iso else datetime.now().date()
+    except ValueError:
+        fecha_periodo = datetime.now().date()
+
+    ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
+
+    try:
+        with st.spinner("Subiendo a Google Drive..."):
+            service, service_sheets, credenciales_actualizadas = google_drive.construir_servicios_google(credenciales)
+            carpetas        = google_drive.obtener_o_crear_ruta_carpetas(service, ruta_drive_destino)
+            carpeta_destino = carpetas[-1]
+            archivos        = google_drive.subir_zip_como_documentos(
+                service,
+                contenido_zip,
+                folder_id      = carpeta_destino["id"],
+                service_sheets = service_sheets,
+            )
+            st.session_state.google_drive_credentials = credenciales_actualizadas
+            st.session_state.google_drive_usuario     = google_drive.obtener_usuario_conectado(service)
+
+        st.success(f"✅ Se subieron {len(archivos)} documento(s) a {' / '.join(ruta_drive_destino)}")
+
+        total_fallback = sum(1 for a in archivos if a.get("_checkbox_fallback"))
+        if total_fallback > 0:
+            st.warning(f"{total_fallback} archivo(s) se subieron como .xlsx sin conversión a Google Sheets.")
+
+        if carpeta_destino.get("webViewLink"):
+            st.link_button("📁 Abrir carpeta en Google Drive", carpeta_destino["webViewLink"],
+                           use_container_width=True)
+
+    except Exception as exc:
+        from utils import google_drive as gd
+        if gd.es_error_de_scopes_google(exc):
+            st.session_state.google_drive_credentials = None
+            st.error("Los permisos de Drive expiraron. Vuelve a presionar 'Subir a Drive' para reconectarte.")
+        elif gd.es_error_api_sheets_deshabilitada(exc):
+            st.error("Google Sheets API está deshabilitada en tu proyecto de Google Cloud.")
+        else:
+            st.error(f"No se pudo subir a Google Drive: {exc}")
+
+
+def _conectar_y_subir_a_drive(contenido_zip):
+    from utils import google_drive
+
+    # Si ya tenemos el código OAuth en los query params (regreso de Google)
+    params = st.query_params
+    code   = params.get("code", "")
+    state  = params.get("state", "")
+
+    if code and state:
+        flow_config = st.session_state.get("google_oauth_flow_config")
+        if flow_config:
+            try:
+                credenciales = google_drive.intercambiar_codigo_por_credenciales(
+                    code, state, flow_config
+                )
+                service, service_sheets, credenciales_actualizadas = \
+                    google_drive.construir_servicios_google(credenciales)
+                st.session_state.google_drive_credentials = credenciales_actualizadas
+                st.session_state.google_drive_usuario     = \
+                    google_drive.obtener_usuario_conectado(service)
+                st.query_params.clear()
+                _subir_a_drive(contenido_zip)
+                return
+            except Exception as exc:
+                st.error(f"Error al completar autenticación: {exc}")
+                return
+
+    # Si no hay código, redirigir a Google para autenticar
+    try:
+        client_config, _ = google_drive.resolver_client_config_drive()
+    except Exception as exc:
+        st.error(f"Configuración OAuth no válida: {exc}")
+        return
+
+    if client_config is None:
+        st.error("No se encontró configuración OAuth. Contacta al administrador.")
+        return
+
+    try:
+        auth_url, _ = google_drive.autorizar_google_drive(client_config)
+        st.markdown(
+            f'<meta http-equiv="refresh" content="0; url={auth_url}">',
+            unsafe_allow_html=True,
+        )
+        st.info("Redirigiendo a Google para autorizar acceso a Drive...")
+    except Exception as exc:
+        st.error(f"No fue posible iniciar autenticación: {exc}")
+
+
 with st.container(border=True):
     st.markdown("### 4. Descargar documentación")
 
@@ -448,27 +546,43 @@ with st.container(border=True):
                     datetime.now().date(),
                 )
                 contenido_zip = buffer_zip.getvalue()
-                st.session_state.ultimo_paquete_zip_bytes    = contenido_zip
-                st.session_state.ultimo_paquete_zip_nombre   = f"{nombre_carpeta}.zip"
-                st.session_state.ultimo_paquete_drive_folder = formatear_nombre_carpeta_documentacion(fecha_ref)
-                st.session_state.ultimo_paquete_periodo      = fecha_ref.isoformat()
+                st.session_state.ultimo_paquete_zip_bytes     = contenido_zip
+                st.session_state.ultimo_paquete_zip_nombre    = f"{nombre_carpeta}.zip"
+                st.session_state.ultimo_paquete_drive_folder  = formatear_nombre_carpeta_documentacion(fecha_ref)
+                st.session_state.ultimo_paquete_periodo       = fecha_ref.isoformat()
                 st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
-                st.session_state.ultimo_paquete_generado_en  = datetime.now().isoformat()
-
-                st.download_button(
-                    label               = "⬇️ Descargar Paquete (.zip)",
-                    data                = contenido_zip,
-                    file_name           = f"{nombre_carpeta}.zip",
-                    mime                = "application/zip",
-                    use_container_width = True,
-                )
-                st.page_link(
-                    "pages/4_Google Drive.py",
-                    label="Guardar también en Google Drive",
-                    use_container_width=True,
-                )
+                st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
 
             if errores:
                 with st.expander("Detalles de advertencias u omisiones"):
                     for err in errores:
                         st.warning(err)
+
+    # Botones de descarga y Drive — aparecen cuando hay paquete generado
+    contenido_zip = st.session_state.get("ultimo_paquete_zip_bytes", b"")
+    nombre_zip    = st.session_state.get("ultimo_paquete_zip_nombre", "")
+
+    if contenido_zip and nombre_zip:
+        st.divider()
+        col_descargar, col_drive = st.columns(2)
+
+        with col_descargar:
+            st.download_button(
+                label               = "⬇️ Descargar Paquete (.zip)",
+                data                = contenido_zip,
+                file_name           = nombre_zip,
+                mime                = "application/zip",
+                use_container_width = True,
+            )
+
+        with col_drive:
+            if st.session_state.get("google_drive_credentials"):
+                usuario = st.session_state.get("google_drive_usuario", {})
+                correo  = usuario.get("emailAddress", "")
+                if correo:
+                    st.caption(f"☁️ Conectado como {correo}")
+                if st.button("☁️ Subir a Drive", use_container_width=True, type="primary"):
+                    _subir_a_drive(contenido_zip)
+            else:
+                if st.button("☁️ Subir a Drive", use_container_width=True):
+                    _conectar_y_subir_a_drive(contenido_zip)
