@@ -444,12 +444,24 @@ def subir_archivo_bytes(service, nombre_archivo, contenido, folder_id=None, mime
 
 def _es_validacion_checkbox_excel(validacion):
     formula1 = str(getattr(validacion, "formula1", "") or "")
-    formula_normalizada = formula1.lower()
-    return (
-        getattr(validacion, "type", "") == "list"
-        and "n/a" in formula_normalizada
-        and any(marca in formula1 for marca in ("✓", "✔", "✖", "✘"))
-    )
+    if getattr(validacion, "type", "") != "list":
+        return False
+
+    formula_normalizada = formula1.lower().strip()
+    tiene_marcas = any(marca in formula1 for marca in ("✓", "✔", "✖", "✘"))
+    tiene_na_texto = any(na in formula_normalizada for na in ("n/a", "na", "n a"))
+    if tiene_marcas or tiene_na_texto:
+        return True
+
+    if formula_normalizada.startswith('"') and formula_normalizada.endswith('"'):
+        opciones = [op.strip().lower() for op in formula_normalizada[1:-1].split(",") if op.strip()]
+        opciones_set = set(opciones)
+        tiene_na = bool(opciones_set & {"n/a", "na", "n a"})
+        tiene_check = bool(opciones_set & {"✔", "✓", "✘", "✖"})
+        if tiene_na or tiene_check:
+            return True
+
+    return False
 
 
 def _normalizar_formula_validacion(formula):
@@ -674,6 +686,64 @@ def _extraer_validaciones_generales_desde_excel(contenido_excel):
     return validaciones_por_hoja
 
 
+def _extraer_columnas_checkbox_desde_excel(contenido_excel):
+    columnas_por_hoja = {}
+    encabezados_objetivo = {"cumple", "no cumple", "no aplica", "n/a", "na", "n a", "si", "no"}
+    marcas_checkbox = {"✔", "✓", "✘", "✖", "n/a", "na", "n a"}
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Data Validation extension is not supported and will be removed",
+            category=UserWarning,
+        )
+        workbook = load_workbook(BytesIO(contenido_excel), data_only=False)
+
+    try:
+        for hoja in workbook.worksheets:
+            max_col = min(hoja.max_column, 120)
+            max_row = min(hoja.max_row, 240)
+            columnas = {}
+
+            for fila in range(1, max_row + 1):
+                for col in range(1, max_col + 1):
+                    valor = hoja.cell(row=fila, column=col).value
+                    if valor is None:
+                        continue
+
+                    texto = str(valor).strip()
+                    if not texto:
+                        continue
+
+                    texto_norm = re.sub(r"[^a-z0-9/]+", " ", texto.lower()).strip()
+                    es_encabezado = (
+                        texto_norm in encabezados_objetivo
+                        or texto_norm.startswith("cumple")
+                        or texto_norm.startswith("no cumple")
+                        or texto_norm.startswith("no aplica")
+                    )
+                    es_marca = texto in {"✔", "✓", "✘", "✖"} or texto_norm in marcas_checkbox
+                    if not (es_encabezado or es_marca):
+                        continue
+
+                    fila_inicio = fila + 1 if es_encabezado else fila
+                    if col not in columnas or fila_inicio < columnas[col]:
+                        columnas[col] = fila_inicio
+
+            if columnas:
+                columnas_por_hoja[hoja.title] = [
+                    {
+                        "column_index_0": col - 1,
+                        "start_row_index_0": max(0, fila_inicio - 1),
+                    }
+                    for col, fila_inicio in sorted(columnas.items())
+                ]
+    finally:
+        workbook.close()
+
+    return columnas_por_hoja
+
+
 def _obtener_ids_hojas_google(service_sheets, spreadsheet_id):
     respuesta = _ejecutar_con_reintentos(service_sheets.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
@@ -809,7 +879,7 @@ def _aplicar_checkboxes_fallback_por_encabezado(service_sheets, spreadsheet_id):
 
         muestra = _ejecutar_con_reintentos(service_sheets.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
-            ranges=[f"'{titulo}'!A1:CB120"],
+            ranges=[f"'{titulo}'!A1:CB240"],
             includeGridData=True,
             fields="sheets(data(rowData(values(formattedValue))))"
         ))
@@ -835,6 +905,70 @@ def _aplicar_checkboxes_fallback_por_encabezado(service_sheets, spreadsheet_id):
             solicitudes.append({
                 "repeatCell": {
                     "range": grid_range,
+                    "cell": {
+                        "dataValidation": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "✔"},
+                                    {"userEnteredValue": "✘"},
+                                    {"userEnteredValue": "N/A"},
+                                ],
+                            },
+                            "strict": False,
+                            "showCustomUi": True,
+                        },
+                    },
+                    "fields": "dataValidation",
+                }
+            })
+
+    if solicitudes:
+        _ejecutar_con_reintentos(service_sheets.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": solicitudes}
+        ))
+
+
+def _aplicar_checkboxes_por_columna_desde_excel(service_sheets, spreadsheet_id, columnas_por_hoja):
+    if not columnas_por_hoja:
+        return
+
+    metadata = _ejecutar_con_reintentos(service_sheets.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title,gridProperties(rowCount)))"
+    ))
+
+    props_por_titulo = {}
+    for hoja in metadata.get("sheets", []):
+        props = hoja.get("properties", {})
+        titulo = props.get("title")
+        sheet_id = props.get("sheetId")
+        total_rows = int(props.get("gridProperties", {}).get("rowCount", 0) or 0)
+        if titulo and sheet_id is not None and total_rows > 0:
+            props_por_titulo[titulo] = (sheet_id, total_rows)
+
+    solicitudes = []
+    for titulo_hoja, columnas in columnas_por_hoja.items():
+        if titulo_hoja not in props_por_titulo:
+            continue
+
+        sheet_id, total_rows = props_por_titulo[titulo_hoja]
+        for item in columnas:
+            col_idx = int(item.get("column_index_0", -1))
+            start_row_idx = int(item.get("start_row_index_0", 0))
+            if col_idx < 0 or start_row_idx >= total_rows:
+                continue
+
+            solicitudes.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": start_row_idx,
+                        "endRowIndex": total_rows,
+                        "startColumnIndex": col_idx,
+                        "endColumnIndex": col_idx + 1,
+                    },
                     "cell": {
                         "dataValidation": {
                             "condition": {
@@ -895,7 +1029,6 @@ def subir_excel_como_google_sheet(service_drive, service_sheets, nombre_archivo,
             _aplicar_validaciones_generales_en_google_sheet(service_sheets, archivo["id"], validaciones_generales)
         if configuracion_por_hoja:
             _aplicar_checkboxes_en_google_sheet(service_sheets, archivo["id"], configuracion_por_hoja)
-        _aplicar_checkboxes_fallback_por_encabezado(service_sheets, archivo["id"])
     except Exception:
         try:
             _ejecutar_con_reintentos(service_drive.files().delete(fileId=archivo["id"]))

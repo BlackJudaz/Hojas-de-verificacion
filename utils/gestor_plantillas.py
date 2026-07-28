@@ -439,7 +439,9 @@ def _aplicar_validacion_verificacion(ws):
         ws.add_data_validation(validacion_estado)
 
         encabezados_objetivo = {"cumple", "no cumple", "no aplica", "na", "n a", "n/a", "si", "no"}
-        columnas_objetivo    = set()
+        marcas_checkbox = {"✔", "✓", "✘", "✖"}
+        valores_na = {"n/a", "na", "n a"}
+        columnas_objetivo = set()
         max_col = min(ws.max_column, 80)
         max_row = min(ws.max_row, 120)
 
@@ -452,6 +454,19 @@ def _aplicar_validacion_verificacion(ws):
                 if texto in encabezados_objetivo or texto.startswith(("cumple", "no aplica")):
                     columnas_objetivo.add(cell.column)
 
+        # Fallback: si no detecta por encabezado, usar columnas con marcas visibles.
+        if not columnas_objetivo:
+            for fila in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
+                for cell in fila:
+                    if cell.value is None:
+                        continue
+                    texto = str(cell.value).strip()
+                    if not texto:
+                        continue
+                    texto_norm = re.sub(r"[^a-z0-9/]+", " ", _normalize_text(texto)).strip()
+                    if texto in marcas_checkbox or texto_norm in valores_na:
+                        columnas_objetivo.add(cell.column)
+
         for col in sorted(columnas_objetivo):
             for row in range(1, ws.max_row + 1):
                 celda = _obtener_celda_para_escribir(ws, row, col)
@@ -459,7 +474,14 @@ def _aplicar_validacion_verificacion(ws):
                     texto = _normalize_text(celda.value)
                     if texto in encabezados_objetivo or texto.startswith(("cumple", "no aplica")):
                         continue
-                if celda.value in (None, "", "✔", "✘", "N/A"):
+
+                valor = celda.value
+                if not isinstance(valor, str):
+                    continue
+
+                texto = valor.strip()
+                texto_norm = _normalize_text(texto)
+                if texto in marcas_checkbox or texto_norm in valores_na:
                     validacion_estado.add(celda)
     except Exception:
         pass

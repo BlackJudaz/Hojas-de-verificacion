@@ -1,8 +1,10 @@
 # pages/Hojas de Verificacion.py
 import re
+import json
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 from utils.gestor_plantillas import crear_paquete_reporte
 from utils.google_drive import (
@@ -112,6 +114,21 @@ def _conectar_y_subir_a_drive(contenido_zip):
 MAX_ANALIZADORES = 3
 COLUMNA_ID = "# ACTIVO"
 
+# Paleta visual de la tabla AgGrid (ajustable en un solo lugar)
+TABLA_COLORES = {
+    "fondo": "#0E1117",
+    "fondo_encabezado": "#1B1F2A",
+    "texto_encabezado": "#A7B0C0",
+    "texto_fila": "#F3F7FF",
+    "texto_id": "#F3F7FF",
+    "linea": "#2A3140",
+    "linea_fuerte": "#353D4D",
+    "hover_fila": "#151A24",
+    "seleccion_fila": "#1E2B3E",
+    "acento": "#23363D",
+    "checkbox_borde": "#5D87B5",
+}
+
 
 @st.cache_data(show_spinner=False)
 def _cargar_analizadores_cached():
@@ -140,10 +157,15 @@ def inicializar_estado():
         "filtro_marca":                     [],
         "filtro_activo":                    [],
         "filtro_ubicacion":                 [],
+        "ui_filtro_tipo_activo_display":    [],
+        "ui_filtro_marca":                  [],
+        "ui_filtro_activo":                 [],
+        "ui_filtro_ubicacion":              [],
         "_selector_reset_token":            0,
         "_selector_sincronizar_visual":     False,
         "_selector_limpiar_visual":         False,
         "_selector_ids_visibles":           [],
+        "_selector_grid_key_rendered":      "",
         "_selector_df_editor":             None,
     }
     for key, val in defaults.items():
@@ -158,12 +180,51 @@ def limpiar_filtros():
     st.session_state.filtro_marca            = []
     st.session_state.filtro_activo           = []
     st.session_state.filtro_ubicacion        = []
+    st.session_state.ui_filtro_tipo_activo_display = []
+    st.session_state.ui_filtro_marca         = []
+    st.session_state.ui_filtro_activo        = []
+    st.session_state.ui_filtro_ubicacion     = []
     st.session_state.pop("_selector_cache_clave", None)
     st.session_state.pop("_selector_df_base", None)
     st.session_state["_selector_df_editor"] = None
     st.session_state["_selector_sincronizar_visual"] = False
     st.session_state["_selector_limpiar_visual"] = False
     st.session_state["_selector_ids_visibles"] = []
+
+
+def _marcar_entrada_pagina_hojas():
+    pagina_actual = "page_hojas_verificacion"
+    pagina_previa = st.session_state.get("_pagina_actual", "")
+    st.session_state["_pagina_actual"] = pagina_actual
+    return pagina_previa != pagina_actual
+
+
+def _restaurar_widgets_filtro_desde_estado(forzar=False):
+    # Los widgets pueden perder su estado al navegar entre paginas;
+    # estas claves no-widget conservan la seleccion original.
+    if "ui_filtro_tipo_activo_display" not in st.session_state or (
+        forzar and not st.session_state.get("ui_filtro_tipo_activo_display") and st.session_state.get("filtro_tipo_activo_display")
+    ):
+        st.session_state.ui_filtro_tipo_activo_display = list(st.session_state.get("filtro_tipo_activo_display", []))
+    if "ui_filtro_marca" not in st.session_state or (
+        forzar and not st.session_state.get("ui_filtro_marca") and st.session_state.get("filtro_marca")
+    ):
+        st.session_state.ui_filtro_marca = list(st.session_state.get("filtro_marca", []))
+    if "ui_filtro_activo" not in st.session_state or (
+        forzar and not st.session_state.get("ui_filtro_activo") and st.session_state.get("filtro_activo")
+    ):
+        st.session_state.ui_filtro_activo = list(st.session_state.get("filtro_activo", []))
+    if "ui_filtro_ubicacion" not in st.session_state or (
+        forzar and not st.session_state.get("ui_filtro_ubicacion") and st.session_state.get("filtro_ubicacion")
+    ):
+        st.session_state.ui_filtro_ubicacion = list(st.session_state.get("filtro_ubicacion", []))
+
+
+def _sincronizar_filtros_desde_widgets():
+    st.session_state.filtro_tipo_activo_display = list(st.session_state.get("ui_filtro_tipo_activo_display", []))
+    st.session_state.filtro_marca = list(st.session_state.get("ui_filtro_marca", []))
+    st.session_state.filtro_activo = list(st.session_state.get("ui_filtro_activo", []))
+    st.session_state.filtro_ubicacion = list(st.session_state.get("ui_filtro_ubicacion", []))
 
 
 def _clave(concepto):
@@ -176,35 +237,19 @@ def _total_analizadores(concepto):
     return len(bel) + len(propios)
 
 
-def _toggle_seleccionar_todo_visible(toggle_key):
-    df_editor = st.session_state.get("_selector_df_editor")
-    if df_editor is None or "SELECCIONAR" not in df_editor.columns:
-        return
-
-    marcar_todo = bool(st.session_state.get(toggle_key, False))
-    df_editor = df_editor.copy()
-    df_editor["SELECCIONAR"] = marcar_todo
-    st.session_state["_selector_df_editor"] = df_editor
-
-    ids_en_tabla = set(df_editor[COLUMNA_ID].astype(str))
-    ids_previos = set(st.session_state.ids_equipos_seleccionados)
-    ids_seleccionados_tabla = set(
-        df_editor.loc[df_editor["SELECCIONAR"], COLUMNA_ID].astype(str)
-    )
-    st.session_state.ids_equipos_seleccionados = sorted(
-        (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
-    )
-
-    # Fuerza remontaje del editor para que el estado visual de casillas se actualice al instante.
-    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
-    st.rerun()
-
-
 # ── Inicio de la página ──────────────────────────────────────────────────────
 st.title("Generador de Hojas de Verificación")
 st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
 
 inicializar_estado()
+_entro_desde_otra_pagina = _marcar_entrada_pagina_hojas()
+_restaurar_widgets_filtro_desde_estado(forzar=_entro_desde_otra_pagina)
+
+# Al volver desde otra page, fuerza remontaje del grid para rehidratar
+# visualmente checks y sombreado con la seleccion persistida.
+if _entro_desde_otra_pagina:
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+    st.session_state["_selector_grid_key_rendered"] = ""
 
 if st.session_state.inventario_df is None:
     st.warning("No se ha detectado ningún inventario en el sistema.")
@@ -224,6 +269,7 @@ with main_card:
 
     col_filtros, col_acciones = st.columns([8, 2])
     with col_filtros:
+        _sincronizar_filtros_desde_widgets()
         estados = {
             "filtro_concepto":  st.session_state.filtro_concepto,
             "filtro_marca":     st.session_state.filtro_marca,
@@ -248,39 +294,43 @@ with main_card:
                 opciones_display.append(clave_d)
             mapa_display[clave_d].append(c_orig)
 
-        sel_display = [v for v in st.session_state.filtro_tipo_activo_display if v in mapa_display]
-        if sel_display != st.session_state.filtro_tipo_activo_display:
-            st.session_state.filtro_tipo_activo_display = sel_display
+        sel_display = [v for v in st.session_state.ui_filtro_tipo_activo_display if v in mapa_display]
+        if sel_display != st.session_state.ui_filtro_tipo_activo_display:
+            st.session_state.ui_filtro_tipo_activo_display = sel_display
 
         f1c1, f1c2 = st.columns(2)
         with f1c1:
             st.multiselect(
                 label="Tipo de activo",
                 options=opciones_display,
-                key="filtro_tipo_activo_display",
+                key="ui_filtro_tipo_activo_display",
                 placeholder="Selecciona uno o varios tipos de activo",
                 label_visibility="collapsed",
                 format_func=lambda x: str(x).title(),
             )
             conceptos_filtrados = []
-            for d in st.session_state.filtro_tipo_activo_display:
+            for d in st.session_state.ui_filtro_tipo_activo_display:
                 conceptos_filtrados.extend(mapa_display.get(d, []))
+            st.session_state.filtro_tipo_activo_display = list(st.session_state.ui_filtro_tipo_activo_display)
             st.session_state.filtro_concepto = list(dict.fromkeys(conceptos_filtrados))
 
         with f1c2:
             st.multiselect(label="Marca", options=opciones_calc["MARCA"],
-                           key="filtro_marca", placeholder="Selecciona una o varias marcas",
+                           key="ui_filtro_marca", placeholder="Selecciona una o varias marcas",
                            label_visibility="collapsed")
+            st.session_state.filtro_marca = list(st.session_state.ui_filtro_marca)
 
         f2c1, f2c2 = st.columns(2)
         with f2c1:
             st.multiselect(label="Activo", options=opciones_calc["# ACTIVO"],
-                           key="filtro_activo", placeholder="Selecciona uno o varios activos",
+                           key="ui_filtro_activo", placeholder="Selecciona uno o varios activos",
                            label_visibility="collapsed")
+            st.session_state.filtro_activo = list(st.session_state.ui_filtro_activo)
         with f2c2:
             st.multiselect(label="Ubicación", options=opciones_calc["UBICACIÓN"],
-                           key="filtro_ubicacion", placeholder="Selecciona una o varias ubicaciones",
+                           key="ui_filtro_ubicacion", placeholder="Selecciona una o varias ubicaciones",
                            label_visibility="collapsed")
+            st.session_state.filtro_ubicacion = list(st.session_state.ui_filtro_ubicacion)
 
     with col_acciones:
         if st.button("Buscar", use_container_width=True, type="primary"):
@@ -325,16 +375,9 @@ if st.session_state.get("_selector_cache_clave") != clave_filtros:
     df_sel = df[df[COLUMNA_ID].astype(str).isin(ids_arrastrables)]
     df_mostrar = pd.concat([df_filtrado_no_sel, df_sel], ignore_index=True)
     df_mostrar = df_mostrar.drop_duplicates(subset=[COLUMNA_ID], keep="first")
-    df_editor = df_mostrar[columnas_mostrar].copy()
-    df_editor.insert(
-        0,
-        "SELECCIONAR",
-        df_editor[COLUMNA_ID].astype(str).isin(ids_previos_cache),
-    )
 
     st.session_state["_selector_cache_clave"] = clave_filtros
     st.session_state["_selector_df_base"] = df_mostrar[columnas_mostrar].copy()
-    st.session_state["_selector_df_editor"] = df_editor
 
 
 def _render_selector_equipos(columnas):
@@ -353,57 +396,230 @@ def _render_selector_equipos(columnas):
             st.info("Aplica los filtros para cargar la tabla de equipos.")
             st.stop()
 
-        clave_df = f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}"
-        df_tabla = st.session_state.get("_selector_df_editor")
-        if df_tabla is None:
-            df_tabla = df_base_tabla.copy()
-            df_tabla.insert(
-                0,
-                "SELECCIONAR",
-                df_tabla[COLUMNA_ID].astype(str).isin(ids_previos),
-            )
-            st.session_state["_selector_df_editor"] = df_tabla.copy()
+        # Remonta el grid cuando cambia el filtro para evitar que AgGrid recicle
+        # seleccion por indice y marque filas nuevas por error.
+        filtro_hash = abs(hash(clave_filtros))
+        clave_df = f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}_{filtro_hash}"
+        ultima_key_renderizada = st.session_state.get("_selector_grid_key_rendered", "")
+        es_primer_render_de_esta_vista = ultima_key_renderizada != clave_df
+        df_tabla = df_base_tabla.copy()
+        df_tabla[COLUMNA_ID] = df_tabla[COLUMNA_ID].astype(str)
+        ids_en_tabla = set(df_tabla[COLUMNA_ID].astype(str))
 
-        toggle_all_key = f"selector_toggle_all_{st.session_state.get('_selector_reset_token', 0)}"
-        st.session_state[toggle_all_key] = bool(df_tabla["SELECCIONAR"].all())
-        st.checkbox(
-            "Seleccionar todo lo visible",
-            key=toggle_all_key,
-            help="Marca todo lo visible; si lo desmarcas, se deselecciona todo lo visible.",
-            on_change=_toggle_seleccionar_todo_visible,
-            args=(toggle_all_key,),
+        pre_selected_rows = [
+            idx for idx, activo in enumerate(df_tabla[COLUMNA_ID].tolist())
+            if activo in ids_previos
+        ]
+
+        if es_primer_render_de_esta_vista:
+            ids_preseleccionados_visibles = sorted(ids_previos & ids_en_tabla)
+            js_ids = json.dumps(ids_preseleccionados_visibles)
+            sincronizar_seleccion_js = JsCode(
+                f"""
+                function(params) {{
+                    const wanted = new Set({js_ids});
+                    params.api.forEachNode(function(node) {{
+                        const rowId = String((node.data && node.data['# ACTIVO']) || '');
+                        node.setSelected(wanted.has(rowId));
+                    }});
+                }}
+                """
+            )
+        else:
+            sincronizar_seleccion_js = None
+
+        gb = GridOptionsBuilder.from_dataframe(df_tabla)
+        gb.configure_default_column(
+            sortable=True,
+            filter=False,
+            resizable=True,
+            editable=False,
+            minWidth=120,
+            cellStyle={"textAlign": "left"},
+        )
+        gb.configure_selection(
+            selection_mode="multiple",
+            use_checkbox=True,
+            pre_selected_rows=pre_selected_rows,
+            rowMultiSelectWithClick=False,
+            suppressRowDeselection=False,
+        )
+        gb.configure_grid_options(
+            suppressRowClickSelection=True,
+            rowSelection="multiple",
+            rowHeight=38,
+            headerHeight=36,
+            animateRows=False,
+            suppressCellFocus=True,
+            domLayout="normal",
+            getRowId=JsCode("function(params) { return String(params.data['# ACTIVO'] || ''); }"),
+            onFirstDataRendered=sincronizar_seleccion_js,
+        )
+        gb.configure_column(
+            COLUMNA_ID,
+            checkboxSelection=True,
+            headerCheckboxSelection=True,
+            headerCheckboxSelectionFilteredOnly=True,
+            pinned="left",
+            width=190,
+            cellStyle={"fontWeight": 600, "color": TABLA_COLORES["texto_id"], "textAlign": "left"},
         )
 
-        with st.form(key=f"selector_form_{st.session_state.get('_selector_reset_token', 0)}"):
-            tabla_editada = st.data_editor(
-                df_tabla,
-                use_container_width=True,
-                hide_index=True,
-                key=clave_df,
-                column_config={
-                    "SELECCIONAR": st.column_config.CheckboxColumn(
-                        "Seleccionar",
-                        help="Marca los equipos a trabajar",
-                    )
-                },
-                disabled=[col for col in df_tabla.columns if col != "SELECCIONAR"],
-            )
-            aplicar_seleccion = st.form_submit_button(
-                "Aplicar selección",
-                type="primary",
-                use_container_width=True,
+        if "CONCEPTO" in df_tabla.columns:
+            gb.configure_column("CONCEPTO", width=270)
+        if "MARCA" in df_tabla.columns:
+            gb.configure_column("MARCA", width=170)
+        if "MODELO" in df_tabla.columns:
+            gb.configure_column("MODELO", width=145)
+        if "UBICACIÓN" in df_tabla.columns:
+            gb.configure_column("UBICACIÓN", width=170)
+        if "SUB UBICACIÓN" in df_tabla.columns:
+            gb.configure_column("SUB UBICACIÓN", width=175)
+
+        css_tabla = {
+            ".ag-theme-streamlit": {
+                "--ag-background-color": f"{TABLA_COLORES['fondo']}",
+                "--ag-foreground-color": f"{TABLA_COLORES['texto_fila']}",
+                "--ag-header-background-color": f"{TABLA_COLORES['fondo_encabezado']}",
+                "--ag-header-foreground-color": f"{TABLA_COLORES['texto_encabezado']}",
+                "--ag-row-border-color": f"{TABLA_COLORES['linea']}",
+                "--ag-border-color": f"{TABLA_COLORES['linea_fuerte']}",
+                "--ag-selected-row-background-color": f"{TABLA_COLORES['seleccion_fila']}",
+                "--ag-row-hover-color": f"{TABLA_COLORES['hover_fila']}",
+                "--ag-odd-row-background-color": f"{TABLA_COLORES['fondo']}",
+            },
+            ".ag-root-wrapper": {
+                "border": f"1px solid {TABLA_COLORES['linea_fuerte']}",
+                "border-radius": "6px",
+                "overflow": "hidden",
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-root": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-body": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-header": {
+                "background-color": f"{TABLA_COLORES['fondo_encabezado']} !important",
+                "border-bottom": f"1px solid {TABLA_COLORES['linea_fuerte']}",
+            },
+            ".ag-header-cell": {
+                "font-size": "13px",
+                "font-weight": "600",
+                "color": TABLA_COLORES["texto_encabezado"],
+                "letter-spacing": "0.2px",
+                "font-family": "'Source Sans Pro', sans-serif",
+                "text-align": "left",
+            },
+            ".ag-header-cell-label": {
+                "justify-content": "flex-start",
+                "text-align": "left",
+            },
+            ".ag-row": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+                "color": TABLA_COLORES["texto_fila"],
+                "border-bottom": f"1px solid {TABLA_COLORES['linea']}",
+            },
+            ".ag-row-hover": {
+                "background-color": f"{TABLA_COLORES['hover_fila']} !important",
+            },
+            ".ag-row-selected": {
+                "background-color": f"{TABLA_COLORES['seleccion_fila']} !important",
+            },
+            ".ag-center-cols-viewport": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-center-cols-container": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-body-viewport": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-center-cols-clipper": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-pinned-left-cols-viewport": {
+                "background-color": f"{TABLA_COLORES['fondo']} !important",
+            },
+            ".ag-cell": {
+                "font-size": "13px",
+                "font-weight": "600",
+                "font-family": "'Source Sans Pro', sans-serif",
+                "border-right": f"1px solid {TABLA_COLORES['linea']}",
+                "text-align": "left",
+            },
+            ".ag-header-cell, .ag-cell": {
+                "padding-left": "8px",
+                "padding-right": "8px",
+                "line-height": "1.2",
+            },
+            ".ag-pinned-left-cols-container": {
+                "border-right": f"1px solid {TABLA_COLORES['linea_fuerte']}",
+            },
+            ".ag-checkbox-input-wrapper": {
+                "transform": "scale(0.95)",
+                "border": f"1px solid {TABLA_COLORES['checkbox_borde']}",
+                "border-radius": "3px",
+                "background-color": "transparent",
+            },
+            ".ag-checkbox-input-wrapper.ag-checked": {
+                "background-color": TABLA_COLORES["acento"],
+                "border-color": TABLA_COLORES["acento"],
+            },
+        }
+
+        grid_response = AgGrid(
+            df_tabla,
+            gridOptions=gb.build(),
+            key=clave_df,
+            height=404,
+            fit_columns_on_grid_load=False,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            data_return_mode=DataReturnMode.AS_INPUT,
+            allow_unsafe_jscode=True,
+            theme="streamlit",
+            custom_css=css_tabla,
+            reload_data=False,
+        )
+
+        st.session_state["_selector_ids_visibles"] = sorted(ids_en_tabla)
+
+        seleccionados_grid = set()
+        data_bruta = grid_response.get("data")
+        if isinstance(data_bruta, pd.DataFrame):
+            data_grid = data_bruta.copy()
+            if COLUMNA_ID in data_grid.columns:
+                data_grid[COLUMNA_ID] = data_grid[COLUMNA_ID].astype(str).str.strip()
+            if "_selectedRowNodeInfo" in data_grid.columns and COLUMNA_ID in data_grid.columns:
+                mask_sel = data_grid["_selectedRowNodeInfo"].notna()
+                seleccionados_grid = set(data_grid.loc[mask_sel, COLUMNA_ID])
+
+        seleccion_bruta = grid_response.get("selected_rows")
+        if isinstance(seleccion_bruta, pd.DataFrame):
+            filas_seleccionadas = seleccion_bruta.to_dict("records")
+        elif isinstance(seleccion_bruta, list):
+            filas_seleccionadas = seleccion_bruta
+        else:
+            filas_seleccionadas = []
+
+        st.session_state["_selector_grid_key_rendered"] = clave_df
+
+        if not seleccionados_grid:
+            seleccionados_grid = set(
+                str(fila.get(COLUMNA_ID, "")).strip()
+                for fila in filas_seleccionadas
+                if str(fila.get(COLUMNA_ID, "")).strip()
             )
 
-        ids_en_tabla = set(df_base_tabla[COLUMNA_ID].astype(str))
-        st.session_state["_selector_ids_visibles"] = sorted(ids_en_tabla)
-        if aplicar_seleccion:
-            st.session_state["_selector_df_editor"] = tabla_editada.copy()
-            ids_seleccionados_tabla = set(
-                tabla_editada.loc[tabla_editada["SELECCIONAR"], COLUMNA_ID].astype(str)
-            )
-            ids_finales = (ids_previos - ids_en_tabla) | ids_seleccionados_tabla
-            st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
-            st.rerun()
+        # En el primer render tras cambiar filtros, AgGrid puede reportar vacio
+        # antes de hidratar preseleccion; no borrar seleccion existente por eso.
+        if es_primer_render_de_esta_vista and not seleccionados_grid:
+            ids_finales = ids_previos
+        else:
+            ids_finales = (ids_previos - ids_en_tabla) | seleccionados_grid
+
+        st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
 
         col_info, col_borrar = st.columns([10, 2])
         with col_borrar:
