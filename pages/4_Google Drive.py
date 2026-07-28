@@ -5,6 +5,8 @@ import streamlit as st
 
 from utils import google_drive
 
+st.session_state["_pagina_actual"] = "page_google_drive"
+
 
 def _formatear_periodo(periodo_iso):
     if not periodo_iso:

@@ -6,6 +6,8 @@ from utils.lector_inventario import (
     aplicar_programacion_tinc,
 )
 
+st.session_state["_pagina_actual"] = "page_gestion_informacion"
+
 
 def _resetear_estado_inventario():
     st.session_state.inventario_df                      = None
