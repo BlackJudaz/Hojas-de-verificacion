@@ -44,9 +44,8 @@ drive_conectado = bool(st.session_state.google_drive_credentials)
 
 pagina_1 = st.Page(str(BASE_DIR / "pages" / "1_Hojas de Verificacion.py"),      title="Hojas de Verificación")
 pagina_2 = st.Page(str(BASE_DIR / "pages" / "2_Gestion de informacion.py"),      title="Gestión de Información")
-pagina_4 = st.Page(str(BASE_DIR / "pages" / "4_Google Drive.py"),                title="Google Drive")
 
-pg = st.navigation([pagina_1, pagina_2, pagina_4], position="hidden")
+pg = st.navigation([pagina_1, pagina_2], position="hidden")
 
 with st.sidebar:
     st.image(str(BASE_DIR / "image_5976e1.png"), use_container_width=True)
@@ -54,5 +53,4 @@ with st.sidebar:
     st.markdown("### DOCUMENTACIÓN MP")
     st.page_link(pagina_1, label=f"{'✅' if paquete_listo_para_drive else '⬜'} Documentación")
     st.page_link(pagina_2, label=f"{'✅' if inventario_cargado else '⬜'} Gestión de Información")
-    st.page_link(pagina_4, label=f"{'✅' if drive_conectado else '⬜'} Google Drive")
 pg.run()
