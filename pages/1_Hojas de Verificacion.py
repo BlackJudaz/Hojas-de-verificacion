@@ -1239,16 +1239,11 @@ with st.container(border=True):
                     for err in errores:
                         st.warning(err)
 
-<<<<<<< HEAD
     # ── Botones de descarga y Drive (aparecen cuando hay paquete generado) ──
-=======
-    # Botones de descarga y Drive — aparecen cuando hay paquete generado
->>>>>>> 5b31ff5496ec7342564149291278006abbc07057
     contenido_zip = st.session_state.get("ultimo_paquete_zip_bytes", b"")
     nombre_zip    = st.session_state.get("ultimo_paquete_zip_nombre", "")
 
     if contenido_zip and nombre_zip:
-<<<<<<< HEAD
             st.divider()
             col_descargar, col_drive = st.columns(2)
 
@@ -1263,28 +1258,3 @@ with st.container(border=True):
 
             with col_drive:
                 _seccion_drive(contenido_zip)
-=======
-        st.divider()
-        col_descargar, col_drive = st.columns(2)
-
-        with col_descargar:
-            st.download_button(
-                label               = "⬇️ Descargar Paquete (.zip)",
-                data                = contenido_zip,
-                file_name           = nombre_zip,
-                mime                = "application/zip",
-                use_container_width = True,
-            )
-
-        with col_drive:
-            if st.session_state.get("google_drive_credentials"):
-                usuario = st.session_state.get("google_drive_usuario", {})
-                correo  = usuario.get("emailAddress", "")
-                if correo:
-                    st.caption(f"☁️ Conectado como {correo}")
-                if st.button("☁️ Subir a Drive", use_container_width=True, type="primary"):
-                    _subir_a_drive(contenido_zip)
-            else:
-                if st.button("☁️ Subir a Drive", use_container_width=True):
-                    _conectar_y_subir_a_drive(contenido_zip)
->>>>>>> 5b31ff5496ec7342564149291278006abbc07057
