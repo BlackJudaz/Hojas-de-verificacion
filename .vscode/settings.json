@@ -1,3 +1,7 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "files.exclude": {
+        "**/datos/.oauth_bridge": true,
+        "**/datos/google_drive_token.json": true
+    }
 }

@@ -6,6 +6,8 @@ import re
 import socket
 import time
 import warnings
+import hashlib
+import tempfile
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -35,6 +37,309 @@ _MESES = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
+
+_OAUTH_FLOW_CACHE_TTL_SECONDS = 15 * 60
+_OAUTH_FLOW_CACHE = {}
+_OAUTH_RESULT_CACHE_TTL_SECONDS = 15 * 60
+_OAUTH_RESULT_CACHE = {}
+_OAUTH_BRIDGE_DIR = Path(tempfile.gettempdir()) / "hojas_verificacion_oauth_bridge"
+_OAUTH_TOKEN_STORE_PATH = Path(tempfile.gettempdir()) / "hojas_verificacion_google_drive_token.json"
+
+
+def _state_key(state):
+    estado = str(state or "").strip()
+    if not estado:
+        return ""
+    return hashlib.sha256(estado.encode("utf-8")).hexdigest()
+
+
+def _ruta_flow_oauth(state):
+    clave = _state_key(state)
+    if not clave:
+        return None
+    return _OAUTH_BRIDGE_DIR / f"flow_{clave}.json"
+
+
+def _ruta_resultado_oauth(state):
+    clave = _state_key(state)
+    if not clave:
+        return None
+    return _OAUTH_BRIDGE_DIR / f"result_{clave}.json"
+
+
+def _guardar_json_seguro(ruta, payload):
+    try:
+        _OAUTH_BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _cargar_json_seguro(ruta):
+    if not ruta or not ruta.exists() or not ruta.is_file():
+        return None
+    try:
+        return json.loads(ruta.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _expirado(payload, ttl_segundos):
+    try:
+        ts = float(payload.get("ts", 0))
+    except Exception:
+        return True
+    return (time.time() - ts) > ttl_segundos
+
+
+def guardar_token_oauth_local(credenciales_info, usuario=None):
+    if not isinstance(credenciales_info, dict) or not credenciales_info:
+        return False
+
+    payload = {
+        "ts": time.time(),
+        "credenciales": dict(credenciales_info),
+        "usuario": dict(usuario or {}),
+    }
+
+    try:
+        _OAUTH_TOKEN_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _OAUTH_TOKEN_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def cargar_token_oauth_local():
+    if not _OAUTH_TOKEN_STORE_PATH.exists() or not _OAUTH_TOKEN_STORE_PATH.is_file():
+        return None
+
+    try:
+        payload = json.loads(_OAUTH_TOKEN_STORE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    credenciales = payload.get("credenciales") if isinstance(payload, dict) else None
+    if not isinstance(credenciales, dict) or not credenciales:
+        return None
+
+    usuario = payload.get("usuario") if isinstance(payload.get("usuario"), dict) else {}
+    return {
+        "credenciales": credenciales,
+        "usuario": usuario,
+    }
+
+
+def limpiar_token_oauth_local():
+    try:
+        if _OAUTH_TOKEN_STORE_PATH.exists():
+            _OAUTH_TOKEN_STORE_PATH.unlink()
+        # Compatibilidad: limpia también la ruta histórica dentro del repo.
+        if _OAUTH_TOKEN_PATH.exists():
+            _OAUTH_TOKEN_PATH.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _limpiar_cache_oauth_expirado():
+    ahora = time.time()
+    expirados = [
+        estado
+        for estado, payload in _OAUTH_FLOW_CACHE.items()
+        if ahora - payload.get("ts", 0) > _OAUTH_FLOW_CACHE_TTL_SECONDS
+    ]
+    for estado in expirados:
+        _OAUTH_FLOW_CACHE.pop(estado, None)
+
+
+def guardar_flow_config_oauth(state, flow_config):
+    estado = str(state or "").strip()
+    if not estado or not isinstance(flow_config, dict):
+        return
+
+    _limpiar_cache_oauth_expirado()
+    payload = {
+        "ts": time.time(),
+        "flow_config": dict(flow_config),
+    }
+    _OAUTH_FLOW_CACHE[estado] = payload
+
+    ruta = _ruta_flow_oauth(estado)
+    if ruta:
+        _guardar_json_seguro(ruta, payload)
+
+
+def obtener_flow_config_oauth(state):
+    estado = str(state or "").strip()
+    if not estado:
+        return None
+
+    _limpiar_cache_oauth_expirado()
+    payload = _OAUTH_FLOW_CACHE.get(estado)
+    if payload and not _expirado(payload, _OAUTH_FLOW_CACHE_TTL_SECONDS):
+        return dict(payload.get("flow_config") or {})
+
+    ruta = _ruta_flow_oauth(estado)
+    payload_archivo = _cargar_json_seguro(ruta)
+    if not payload_archivo:
+        return None
+
+    if _expirado(payload_archivo, _OAUTH_FLOW_CACHE_TTL_SECONDS):
+        try:
+            ruta.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+    _OAUTH_FLOW_CACHE[estado] = payload_archivo
+    return dict(payload_archivo.get("flow_config") or {})
+
+
+def _limpiar_cache_resultado_oauth_expirado():
+    ahora = time.time()
+    expirados = [
+        estado
+        for estado, payload in _OAUTH_RESULT_CACHE.items()
+        if ahora - payload.get("ts", 0) > _OAUTH_RESULT_CACHE_TTL_SECONDS
+    ]
+    for estado in expirados:
+        _OAUTH_RESULT_CACHE.pop(estado, None)
+
+
+def guardar_resultado_oauth(state, credenciales_info, usuario=None, error=None):
+    estado = str(state or "").strip()
+    if not estado or not isinstance(credenciales_info, dict):
+        return
+
+    _limpiar_cache_resultado_oauth_expirado()
+    payload = {
+        "ts": time.time(),
+        "credenciales": dict(credenciales_info),
+        "usuario": dict(usuario or {}),
+        "error": str(error or "").strip(),
+    }
+    _OAUTH_RESULT_CACHE[estado] = payload
+
+    ruta = _ruta_resultado_oauth(estado)
+    if ruta:
+        _guardar_json_seguro(ruta, payload)
+
+
+def obtener_resultado_oauth(state, consume=True):
+    estado = str(state or "").strip()
+    if not estado:
+        return None
+
+    _limpiar_cache_resultado_oauth_expirado()
+    payload = _OAUTH_RESULT_CACHE.get(estado)
+    if not payload or _expirado(payload, _OAUTH_RESULT_CACHE_TTL_SECONDS):
+        ruta = _ruta_resultado_oauth(estado)
+        payload_archivo = _cargar_json_seguro(ruta)
+        if not payload_archivo:
+            return None
+
+        if _expirado(payload_archivo, _OAUTH_RESULT_CACHE_TTL_SECONDS):
+            try:
+                ruta.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        payload = payload_archivo
+        _OAUTH_RESULT_CACHE[estado] = payload
+
+    if consume:
+        _OAUTH_RESULT_CACHE.pop(estado, None)
+        ruta = _ruta_resultado_oauth(estado)
+        if ruta:
+            try:
+                ruta.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return {
+        "credenciales": dict(payload.get("credenciales") or {}),
+        "usuario": dict(payload.get("usuario") or {}),
+        "error": str(payload.get("error") or "").strip(),
+    }
+
+
+def obtener_ultimo_resultado_oauth(consume=True):
+    _limpiar_cache_resultado_oauth_expirado()
+
+    candidato_payload = None
+    candidato_estado = None
+
+    for estado, payload in list(_OAUTH_RESULT_CACHE.items()):
+        if _expirado(payload, _OAUTH_RESULT_CACHE_TTL_SECONDS):
+            _OAUTH_RESULT_CACHE.pop(estado, None)
+            continue
+        if candidato_payload is None or float(payload.get("ts", 0)) > float(candidato_payload.get("ts", 0)):
+            candidato_payload = payload
+            candidato_estado = estado
+
+    try:
+        if _OAUTH_BRIDGE_DIR.exists() and _OAUTH_BRIDGE_DIR.is_dir():
+            for ruta in _OAUTH_BRIDGE_DIR.glob("result_*.json"):
+                payload_archivo = _cargar_json_seguro(ruta)
+                if not payload_archivo:
+                    continue
+                if _expirado(payload_archivo, _OAUTH_RESULT_CACHE_TTL_SECONDS):
+                    try:
+                        ruta.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
+                if candidato_payload is None or float(payload_archivo.get("ts", 0)) > float(candidato_payload.get("ts", 0)):
+                    candidato_payload = payload_archivo
+                    candidato_estado = None
+    except Exception:
+        pass
+
+    if not candidato_payload:
+        return None
+
+    if consume:
+        if candidato_estado:
+            _OAUTH_RESULT_CACHE.pop(candidato_estado, None)
+            ruta_estado = _ruta_resultado_oauth(candidato_estado)
+            if ruta_estado:
+                try:
+                    ruta_estado.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        else:
+            ruta_archivo = None
+            try:
+                if _OAUTH_BRIDGE_DIR.exists() and _OAUTH_BRIDGE_DIR.is_dir():
+                    archivos = [
+                        r for r in _OAUTH_BRIDGE_DIR.glob("result_*.json")
+                        if _cargar_json_seguro(r) == candidato_payload
+                    ]
+                    if archivos:
+                        ruta_archivo = archivos[0]
+            except Exception:
+                ruta_archivo = None
+            if ruta_archivo:
+                try:
+                    ruta_archivo.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    return {
+        "credenciales": dict(candidato_payload.get("credenciales") or {}),
+        "usuario": dict(candidato_payload.get("usuario") or {}),
+        "error": str(candidato_payload.get("error") or "").strip(),
+    }
+
+
+def guardar_error_oauth(state, mensaje):
+    estado = str(state or "").strip()
+    if not estado:
+        return
+    guardar_resultado_oauth(estado, {}, usuario={}, error=mensaje)
 
 
 def normalizar_fecha(valor, fecha_por_defecto):
@@ -247,12 +552,15 @@ def autorizar_google_drive(client_config):
         prompt="consent",
     )
 
-    # Guardar state y flow en session para verificar después
+    # Guardar state y PKCE para verificar e intercambiar después.
     st.session_state["google_oauth_state"] = state
-    st.session_state["google_oauth_flow_config"] = {
+    flow_config = {
         "client_config": client_config,
         "redirect_uri": redirect_uri,
+        "code_verifier": getattr(flow, "code_verifier", None),
     }
+    st.session_state["google_oauth_flow_config"] = flow_config
+    guardar_flow_config_oauth(state, flow_config)
 
     return auth_url, flow
 
@@ -283,6 +591,11 @@ def intercambiar_codigo_por_credenciales(code, state, flow_config):
         redirect_uri=flow_config["redirect_uri"],
         state=state,
     )
+
+    code_verifier = flow_config.get("code_verifier") if isinstance(flow_config, dict) else None
+    if code_verifier:
+        flow.code_verifier = code_verifier
+
     flow.fetch_token(code=code)
     credentials = flow.credentials
     return json.loads(credentials.to_json())
@@ -1112,6 +1425,19 @@ def _iterar_entradas_zip_validas(contenido_zip):
             yield archivo_zip, info, partes, prefijo_comun
 
 
+def _es_pdf_bytes(contenido):
+    return bytes(contenido[:5]).startswith(b"%PDF-")
+
+
+def _es_excel_xlsx_bytes(contenido):
+    try:
+        with zipfile.ZipFile(BytesIO(contenido), "r") as paquete_excel:
+            nombres = set(paquete_excel.namelist())
+            return "[Content_Types].xml" in nombres and "xl/workbook.xml" in nombres
+    except Exception:
+        return False
+
+
 def subir_zip_como_documentos(service, contenido_zip, folder_id, service_sheets=None):
     carpetas_cache = {(): folder_id}
     archivos_subidos = []
@@ -1153,9 +1479,24 @@ def subir_zip_como_documentos(service, contenido_zip, folder_id, service_sheets=
                 carpetas_cache[clave] = carpeta["id"]
             carpeta_actual = carpetas_cache[clave]
 
-        nombre_archivo = partes_subida[-1]
-        mime_type = mimetypes.guess_type(nombre_archivo)[0] or "application/octet-stream"
+        nombre_archivo = str(partes_subida[-1]).strip()
+        nombre_archivo_lower = nombre_archivo.lower()
         contenido = archivo_zip.read(info.filename)
+        es_pdf = nombre_archivo_lower.endswith(".pdf") or _es_pdf_bytes(contenido)
+        es_excel = nombre_archivo_lower.endswith(".xlsx") or _es_excel_xlsx_bytes(contenido)
+
+        if not es_pdf and not es_excel:
+            continue
+
+        if es_pdf and not nombre_archivo_lower.endswith(".pdf"):
+            nombre_archivo = f"{nombre_archivo}.pdf"
+            nombre_archivo_lower = nombre_archivo.lower()
+        if es_excel and not nombre_archivo_lower.endswith(".xlsx"):
+            nombre_archivo = f"{nombre_archivo}.xlsx"
+            nombre_archivo_lower = nombre_archivo.lower()
+
+        mime_type = "application/pdf" if es_pdf else _EXCEL_XLSX_MIME_TYPE
+
         if sheets_disponible and mime_type == _EXCEL_XLSX_MIME_TYPE:
             try:
                 archivo = subir_excel_como_google_sheet(

@@ -13,6 +13,7 @@ venv/
 datos/google_oauth_client.json
 datos/google_drive_credentials.json
 datos/google_drive_token.json
+datos/.oauth_bridge/
 
 # Salidas generadas por la app
 reportes/

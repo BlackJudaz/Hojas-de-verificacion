@@ -1,8 +1,11 @@
 # pages/Hojas de Verificacion.py
 import re
 import json
+import zipfile
+from io import BytesIO
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, date
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
@@ -30,6 +33,37 @@ config = {
     "hospital": st.session_state.get("nombre_hospital", ""),
 }
 
+
+def _contar_archivos_en_zip(contenido_zip):
+    try:
+        with zipfile.ZipFile(BytesIO(contenido_zip), "r") as archivo_zip:
+            total = 0
+            for info in archivo_zip.infolist():
+                if not info.filename or info.is_dir() or info.filename.startswith("__MACOSX/"):
+                    continue
+
+                nombre = str(info.filename).strip().lower()
+                if nombre.endswith((".pdf", ".xlsx")):
+                    total += 1
+                    continue
+
+                contenido = archivo_zip.read(info.filename)
+                if contenido[:5] == b"%PDF-":
+                    total += 1
+                    continue
+
+                try:
+                    with zipfile.ZipFile(BytesIO(contenido), "r") as candidato_excel:
+                        nombres = set(candidato_excel.namelist())
+                        if "[Content_Types].xml" in nombres and "xl/workbook.xml" in nombres:
+                            total += 1
+                except Exception:
+                    pass
+
+            return total
+    except Exception:
+        return 0
+
 def _subir_a_drive(contenido_zip):
     """Sube el paquete usando credenciales ya guardadas en session_state."""
     from utils import google_drive
@@ -43,6 +77,13 @@ def _subir_a_drive(contenido_zip):
         fecha_periodo      = datetime.now().date()
 
     ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
+    total_archivos_zip = _contar_archivos_en_zip(contenido_zip)
+    if total_archivos_zip == 0:
+        st.error("El paquete no contiene documentos PDF/XLSX para subir. Verifica que se hayan generado hojas o etiquetas.")
+        return
+
+    # Evita mostrar links de una subida previa si esta ejecución falla.
+    st.session_state.ultimo_drive_folder_link = ""
 
     try:
         with st.spinner("Subiendo a Google Drive..."):
@@ -57,8 +98,17 @@ def _subir_a_drive(contenido_zip):
             )
             st.session_state.google_drive_credentials = credenciales_actualizadas
             st.session_state.google_drive_usuario     = google_drive.obtener_usuario_conectado(service)
+            guardar_token_local = getattr(google_drive, "guardar_token_oauth_local", None)
+            if callable(guardar_token_local):
+                guardar_token_local(st.session_state.google_drive_credentials, st.session_state.google_drive_usuario)
+
+        if not archivos:
+            st.error("No se subió ningún archivo porque no se encontraron documentos PDF/XLSX válidos en el paquete.")
+            return
 
         st.success(f"✅ Se subieron {len(archivos)} documento(s) a {' / '.join(ruta_drive_destino)}")
+        st.session_state.ultimo_paquete_drive_folder = " / ".join(ruta_drive_destino)
+        st.session_state.ultimo_drive_folder_link = carpeta_destino.get("webViewLink", "")
 
         total_fallback = sum(1 for a in archivos if a.get("_checkbox_fallback"))
         if total_fallback > 0:
@@ -72,6 +122,10 @@ def _subir_a_drive(contenido_zip):
         from utils import google_drive as gd
         if gd.es_error_de_scopes_google(exc):
             st.session_state.google_drive_credentials = None
+            st.session_state.google_drive_auth_url = ""
+            limpiar_token_local = getattr(gd, "limpiar_token_oauth_local", None)
+            if callable(limpiar_token_local):
+                limpiar_token_local()
             st.error("Los permisos de Drive expiraron. Vuelve a presionar 'Subir a Drive' para reconectarte.")
         elif gd.es_error_api_sheets_deshabilitada(exc):
             st.error("Google Sheets API está deshabilitada en tu proyecto de Google Cloud.")
@@ -79,12 +133,118 @@ def _subir_a_drive(contenido_zip):
             st.error(f"No se pudo subir a Google Drive: {exc}")
 
 
-def _conectar_y_subir_a_drive(contenido_zip):
-    """Abre el flujo OAuth, guarda credenciales en sesión y sube el paquete."""
+def _finalizar_oauth_drive_si_regreso():
+    """Completa OAuth cuando Google regresa con ?code=..."""
+    from utils import google_drive
+
+    def _pantalla_cerrar_pestana(mensaje):
+        st.markdown(
+            f"""
+            <style>
+            [data-testid="stAppViewContainer"] {{
+                background: #000000;
+            }}
+            section[data-testid="stSidebar"] {{
+                display: none;
+            }}
+            [data-testid="stHeader"] {{
+                display: none;
+            }}
+            .oauth-cerrar-wrap {{
+                min-height: 92vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                text-align: center;
+                color: #f5f5f5;
+                font-size: 32px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+                padding: 2rem;
+            }}
+            .oauth-cerrar-sub {{
+                margin-top: 0.8rem;
+                font-size: 16px;
+                font-weight: 400;
+                color: #bdbdbd;
+            }}
+            </style>
+            <div class="oauth-cerrar-wrap">
+                <div>
+                    <div>{mensaje}</div>
+                    <div class="oauth-cerrar-sub">Puedes volver a la pestaña principal.</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    params = st.query_params
+    oauth_error = params.get("error", "")
+    code = params.get("code", "")
+    state = params.get("state", "")
+
+    if oauth_error:
+        st.session_state.google_drive_auth_url = ""
+        st.query_params.clear()
+        _pantalla_cerrar_pestana("Cierre esta pestaña")
+        return True
+
+    if not code:
+        return False
+
+    expected_state = st.session_state.get("google_oauth_state", "")
+    flow_config = st.session_state.get("google_oauth_flow_config")
+    if not flow_config and state:
+        obtener_flow_config = getattr(google_drive, "obtener_flow_config_oauth", None)
+        flow_config = obtener_flow_config(state) if callable(obtener_flow_config) else None
+        if flow_config:
+            st.session_state.google_oauth_state = state
+            st.session_state.google_oauth_flow_config = flow_config
+    if expected_state and state and state != expected_state:
+        st.session_state.google_drive_auth_url = ""
+        st.query_params.clear()
+        _pantalla_cerrar_pestana("Cierre esta pestaña")
+        return True
+
+    if not flow_config or not flow_config.get("code_verifier"):
+        st.session_state.google_drive_auth_url = ""
+        st.query_params.clear()
+        _pantalla_cerrar_pestana("Cierre esta pestaña")
+        return True
+
+    try:
+        credenciales = google_drive.intercambiar_codigo_por_credenciales(code, state, flow_config)
+        service, _, credenciales_actualizadas = google_drive.construir_servicios_google(credenciales)
+        usuario = google_drive.obtener_usuario_conectado(service)
+        st.session_state.google_drive_credentials = credenciales_actualizadas
+        st.session_state.google_drive_usuario = usuario
+        guardar_resultado = getattr(google_drive, "guardar_resultado_oauth", None)
+        if callable(guardar_resultado) and state:
+            guardar_resultado(state, credenciales_actualizadas, usuario)
+        guardar_token_local = getattr(google_drive, "guardar_token_oauth_local", None)
+        if callable(guardar_token_local):
+            guardar_token_local(credenciales_actualizadas, usuario)
+        st.session_state.google_drive_auth_url = ""
+        st.query_params.clear()
+        _pantalla_cerrar_pestana("Cierre esta pestaña")
+    except Exception as exc:
+        guardar_error = getattr(google_drive, "guardar_error_oauth", None)
+        if callable(guardar_error) and state:
+            guardar_error(state, str(exc))
+        st.session_state.google_drive_auth_url = ""
+        st.query_params.clear()
+        _pantalla_cerrar_pestana("Autenticación fallida. Cierre esta pestaña")
+
+    return True
+
+
+def _iniciar_sesion_drive():
+    """Inicia OAuth de Google Drive y muestra enlace de continuación."""
     from utils import google_drive
 
     try:
-        client_config, fuente = google_drive.resolver_client_config_drive()
+        client_config, _ = google_drive.resolver_client_config_drive()
     except Exception as exc:
         st.error(f"Configuración OAuth no válida: {exc}")
         return
@@ -94,22 +254,141 @@ def _conectar_y_subir_a_drive(contenido_zip):
         return
 
     try:
-        with st.spinner("Esperando autorización de Google..."):
-            credenciales = google_drive.autorizar_google_drive(client_config)
-            service, service_sheets, credenciales_actualizadas = google_drive.construir_servicios_google(credenciales)
-            usuario = google_drive.obtener_usuario_conectado(service)
-
-        st.session_state.google_drive_credentials = credenciales_actualizadas
-        st.session_state.google_drive_usuario     = usuario
-
-        # Una vez autenticado, subir directamente
-        _subir_a_drive(contenido_zip)
-
+        auth_url, _ = google_drive.autorizar_google_drive(client_config)
+        st.session_state.google_drive_auth_url = auth_url
+        st.session_state.google_drive_login_state = st.session_state.get("google_oauth_state", "")
     except ModuleNotFoundError as exc:
         modulo = str(getattr(exc, "name", "") or "dependencia requerida")
         st.error(f"Falta instalar '{modulo}'. Ejecuta: pip install -r requirements.txt")
     except Exception as exc:
         st.error(f"No fue posible conectar con Google Drive: {exc}")
+
+
+def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
+    from utils import google_drive
+
+    estado = st.session_state.get("google_drive_login_state", "") or st.session_state.get("google_oauth_state", "")
+    resultado = None
+    obtener_resultado = getattr(google_drive, "obtener_resultado_oauth", None)
+    if callable(obtener_resultado) and estado:
+        resultado = obtener_resultado(estado, consume=True)
+
+    if not resultado:
+        obtener_ultimo_resultado = getattr(google_drive, "obtener_ultimo_resultado_oauth", None)
+        if callable(obtener_ultimo_resultado):
+            resultado = obtener_ultimo_resultado(consume=True)
+
+    if not resultado:
+        if mostrar_mensajes and not estado:
+            st.warning("No hay una autenticación pendiente para sincronizar.")
+        return False
+
+    error_oauth = str(resultado.get("error") or "").strip()
+    if error_oauth:
+        st.session_state.google_drive_auth_url = ""
+        st.session_state.google_drive_login_state = ""
+        if mostrar_mensajes:
+            st.error(f"No se pudo completar la autenticación de Google: {error_oauth}")
+        return False
+
+    credenciales = resultado.get("credenciales") or {}
+    if not credenciales:
+        return False
+
+    st.session_state.google_drive_credentials = credenciales
+    st.session_state.google_drive_usuario = resultado.get("usuario") or {}
+    st.session_state.google_drive_auth_url = ""
+    st.session_state.google_drive_login_state = ""
+    guardar_token_local = getattr(google_drive, "guardar_token_oauth_local", None)
+    if callable(guardar_token_local):
+        guardar_token_local(st.session_state.google_drive_credentials, st.session_state.google_drive_usuario)
+    if mostrar_mensajes:
+        st.success("Sesión de Drive sincronizada. Ya puedes subir el paquete.")
+    return True
+
+
+def _actualizar_estado_drive_desde_oauth():
+    # Flujo estable: intentar sincronizar resultado OAuth y, si no aparece,
+    # rehidratar desde token local guardado.
+    sincronizado = _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=False)
+    restaurado = _restaurar_sesion_drive_desde_token_local()
+    if sincronizado or restaurado:
+        st.success("Sesión de Drive detectada correctamente.")
+        st.rerun()
+    else:
+        st.info("Aún no se detecta la autorización. Termina el proceso en Google y vuelve a intentar.")
+
+
+def _detectar_sesion_drive_automatica():
+    sincronizado = _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=False)
+    restaurado = _restaurar_sesion_drive_desde_token_local()
+    return bool(sincronizado or restaurado)
+
+
+def _activar_polling_drive_si_pendiente():
+    if st.session_state.get("google_drive_credentials"):
+        return
+
+    if not st.session_state.get("google_drive_auth_url"):
+        return
+
+    fragment_api = getattr(st, "fragment", None)
+    if callable(fragment_api):
+        try:
+            @fragment_api(run_every="2s")
+            def _poll_drive_session():
+                if _detectar_sesion_drive_automatica():
+                    st.rerun()
+
+            _poll_drive_session()
+            return
+        except TypeError:
+            # Esta versión de Streamlit no soporta run_every en fragmentos.
+            pass
+
+    # Fallback universal: reintenta cada 2s con rerun completo del app.
+    # Se detiene solo en cuanto haya credenciales (ver el return del inicio).
+    if _detectar_sesion_drive_automatica():
+        st.rerun()
+
+    time.sleep(2)
+    st.rerun()
+
+def _restaurar_sesion_drive_desde_token_local():
+    from utils import google_drive
+
+    if st.session_state.get("google_drive_credentials"):
+        return False
+
+    cargar_token_local = getattr(google_drive, "cargar_token_oauth_local", None)
+    if not callable(cargar_token_local):
+        return False
+
+    payload = cargar_token_local()
+    if not payload:
+        return False
+
+    credenciales = payload.get("credenciales") or {}
+    if not credenciales:
+        return False
+
+    st.session_state.google_drive_credentials = credenciales
+    usuario = payload.get("usuario") or {}
+    if usuario:
+        st.session_state.google_drive_usuario = usuario
+        return True
+
+    try:
+        service, credenciales_actualizadas = google_drive.construir_servicio_drive(credenciales)
+        st.session_state.google_drive_usuario = google_drive.obtener_usuario_conectado(service)
+        st.session_state.google_drive_credentials = credenciales_actualizadas
+        guardar_token_local = getattr(google_drive, "guardar_token_oauth_local", None)
+        if callable(guardar_token_local):
+            guardar_token_local(credenciales_actualizadas, st.session_state.google_drive_usuario)
+    except Exception:
+        pass
+
+    return True
 
 MAX_ANALIZADORES = 3
 COLUMNA_ID = "# ACTIVO"
@@ -149,9 +428,12 @@ def inicializar_estado():
         "ultimo_paquete_zip_bytes":         b"",
         "ultimo_paquete_zip_nombre":        "",
         "ultimo_paquete_drive_folder":      "",
+        "ultimo_drive_folder_link":         "",
         "ultimo_paquete_periodo":           "",
         "ultimo_paquete_periodo_mixto":     False,
         "ultimo_paquete_generado_en":       "",
+        "google_drive_auth_url":            "",
+        "google_drive_login_state":         "",
         "filtro_concepto":                  [],
         "filtro_tipo_activo_display":       [],
         "filtro_marca":                     [],
@@ -238,10 +520,17 @@ def _total_analizadores(concepto):
 
 
 # ── Inicio de la página ──────────────────────────────────────────────────────
+inicializar_estado()
+if _finalizar_oauth_drive_si_regreso():
+    st.stop()
+_restaurar_sesion_drive_desde_token_local()
+
+if not st.session_state.get("google_drive_credentials"):
+    _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=False)
+
 st.title("Generador de Hojas de Verificación")
 st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
-
-inicializar_estado()
+_activar_polling_drive_si_pendiente()
 _entro_desde_otra_pagina = _marcar_entrada_pagina_hojas()
 _restaurar_widgets_filtro_desde_estado(forzar=_entro_desde_otra_pagina)
 
@@ -848,104 +1137,6 @@ st.session_state.analizadores_seleccionados   = list(dict.fromkeys(analizadores_
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 4 — Descargar documentación
 # ════════════════════════════════════════════════════════════════════════════
-
-def _subir_a_drive(contenido_zip):
-    from utils import google_drive
-
-    periodo_iso = st.session_state.get("ultimo_paquete_periodo", "")
-    credenciales = st.session_state.get("google_drive_credentials")
-
-    try:
-        fecha_periodo = datetime.fromisoformat(periodo_iso).date() if periodo_iso else datetime.now().date()
-    except ValueError:
-        fecha_periodo = datetime.now().date()
-
-    ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
-
-    try:
-        with st.spinner("Subiendo a Google Drive..."):
-            service, service_sheets, credenciales_actualizadas = google_drive.construir_servicios_google(credenciales)
-            carpetas        = google_drive.obtener_o_crear_ruta_carpetas(service, ruta_drive_destino)
-            carpeta_destino = carpetas[-1]
-            archivos        = google_drive.subir_zip_como_documentos(
-                service,
-                contenido_zip,
-                folder_id      = carpeta_destino["id"],
-                service_sheets = service_sheets,
-            )
-            st.session_state.google_drive_credentials = credenciales_actualizadas
-            st.session_state.google_drive_usuario     = google_drive.obtener_usuario_conectado(service)
-
-        st.success(f"✅ Se subieron {len(archivos)} documento(s) a {' / '.join(ruta_drive_destino)}")
-
-        total_fallback = sum(1 for a in archivos if a.get("_checkbox_fallback"))
-        if total_fallback > 0:
-            st.warning(f"{total_fallback} archivo(s) se subieron como .xlsx sin conversión a Google Sheets.")
-
-        if carpeta_destino.get("webViewLink"):
-            st.link_button("📁 Abrir carpeta en Google Drive", carpeta_destino["webViewLink"],
-                           use_container_width=True)
-
-    except Exception as exc:
-        from utils import google_drive as gd
-        if gd.es_error_de_scopes_google(exc):
-            st.session_state.google_drive_credentials = None
-            st.error("Los permisos de Drive expiraron. Vuelve a presionar 'Subir a Drive' para reconectarte.")
-        elif gd.es_error_api_sheets_deshabilitada(exc):
-            st.error("Google Sheets API está deshabilitada en tu proyecto de Google Cloud.")
-        else:
-            st.error(f"No se pudo subir a Google Drive: {exc}")
-
-
-def _conectar_y_subir_a_drive(contenido_zip):
-    from utils import google_drive
-
-    # Si ya tenemos el código OAuth en los query params (regreso de Google)
-    params = st.query_params
-    code   = params.get("code", "")
-    state  = params.get("state", "")
-
-    if code and state:
-        flow_config = st.session_state.get("google_oauth_flow_config")
-        if flow_config:
-            try:
-                credenciales = google_drive.intercambiar_codigo_por_credenciales(
-                    code, state, flow_config
-                )
-                service, service_sheets, credenciales_actualizadas = \
-                    google_drive.construir_servicios_google(credenciales)
-                st.session_state.google_drive_credentials = credenciales_actualizadas
-                st.session_state.google_drive_usuario     = \
-                    google_drive.obtener_usuario_conectado(service)
-                st.query_params.clear()
-                _subir_a_drive(contenido_zip)
-                return
-            except Exception as exc:
-                st.error(f"Error al completar autenticación: {exc}")
-                return
-
-    # Si no hay código, redirigir a Google para autenticar
-    try:
-        client_config, _ = google_drive.resolver_client_config_drive()
-    except Exception as exc:
-        st.error(f"Configuración OAuth no válida: {exc}")
-        return
-
-    if client_config is None:
-        st.error("No se encontró configuración OAuth. Contacta al administrador.")
-        return
-
-    try:
-        auth_url, _ = google_drive.autorizar_google_drive(client_config)
-        st.markdown(
-            f'<meta http-equiv="refresh" content="0; url={auth_url}">',
-            unsafe_allow_html=True,
-        )
-        st.info("Redirigiendo a Google para autorizar acceso a Drive...")
-    except Exception as exc:
-        st.error(f"No fue posible iniciar autenticación: {exc}")
-
-
 with st.container(border=True):
     st.markdown("### 4. Descargar documentación")
 
@@ -995,14 +1186,75 @@ with st.container(border=True):
                     datetime.now().date(),
                 )
                 contenido_zip = buffer_zip.getvalue()
-                st.session_state.ultimo_paquete_zip_bytes     = contenido_zip
-                st.session_state.ultimo_paquete_zip_nombre    = f"{nombre_carpeta}.zip"
-                st.session_state.ultimo_paquete_drive_folder  = formatear_nombre_carpeta_documentacion(fecha_ref)
-                st.session_state.ultimo_paquete_periodo       = fecha_ref.isoformat()
-                st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
-                st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
+                total_archivos_zip = _contar_archivos_en_zip(contenido_zip)
+                if total_archivos_zip > 0:
+                    st.session_state.ultimo_paquete_zip_bytes     = contenido_zip
+                    st.session_state.ultimo_paquete_zip_nombre    = f"{nombre_carpeta}.zip"
+                    st.session_state.ultimo_paquete_drive_folder  = formatear_nombre_carpeta_documentacion(fecha_ref)
+                    st.session_state.ultimo_paquete_periodo       = fecha_ref.isoformat()
+                    st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
+                    st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
+                else:
+                    st.session_state.ultimo_paquete_zip_bytes = b""
+                    st.error("Se generó un paquete vacío. Revisa advertencias u omisiones antes de subir a Drive.")
 
             if errores:
                 with st.expander("Detalles de advertencias u omisiones"):
                     for err in errores:
                         st.warning(err)
+
+    # ── Botones de descarga y Drive (aparecen cuando hay paquete generado) ──
+    contenido_zip = st.session_state.get("ultimo_paquete_zip_bytes", b"")
+    nombre_zip    = st.session_state.get("ultimo_paquete_zip_nombre", "")
+
+    if contenido_zip and nombre_zip:
+        st.divider()
+        col_descargar, col_drive = st.columns(2)
+
+        with col_descargar:
+            st.download_button(
+                label               = "⬇️ Descargar Paquete (.zip)",
+                data                = contenido_zip,
+                file_name           = nombre_zip,
+                mime                = "application/zip",
+                use_container_width = True,
+            )
+
+        with col_drive:
+            st.caption("Paso 1: conecta tu cuenta de Drive")
+            if st.session_state.get("google_drive_credentials"):
+                usuario = st.session_state.get("google_drive_usuario", {})
+                correo  = usuario.get("emailAddress", "")
+                if correo:
+                    st.success(f"Sesión iniciada: {correo}")
+            else:
+                if st.button("1) Iniciar sesión en Drive", use_container_width=True):
+                    _iniciar_sesion_drive()
+
+                auth_url = st.session_state.get("google_drive_auth_url", "")
+                if auth_url:
+                    st.markdown(
+                        f"<a href='{auth_url}' target='_blank' rel='noopener noreferrer' style='display:block;text-align:center;padding:0.45rem 0.75rem;border:1px solid rgba(151,166,195,0.35);border-radius:0.5rem;text-decoration:none;'>Continuar con Google (nueva pestaña)</a>",
+                        unsafe_allow_html=True,
+                    )
+                    st.info("Autoriza en Google. Esta pestaña detectará la sesión automáticamente.")
+
+            st.caption("Paso 2: sube el paquete")
+            if st.session_state.get("google_drive_credentials"):
+                if st.button("☁️ Subir a Drive", use_container_width=True, type="primary"):
+                    _subir_a_drive(contenido_zip)
+            else:
+                if st.session_state.get("google_drive_auth_url"):
+                    st.info("Esperando autorización de Google para habilitar la subida...")
+                else:
+                    st.info("Primero inicia sesión para habilitar la subida.")
+
+            st.caption("Paso 3: abre la carpeta destino")
+            drive_folder_link = st.session_state.get("ultimo_drive_folder_link", "")
+            drive_folder_path = st.session_state.get("ultimo_paquete_drive_folder", "")
+            if drive_folder_link:
+                if drive_folder_path:
+                    st.caption(f"Destino en Drive: {drive_folder_path}")
+                st.link_button("📂 Ir al link en Drive", drive_folder_link, use_container_width=True)
+            else:
+                st.info("El link aparecerá cuando termine la subida.")

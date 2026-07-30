@@ -2,6 +2,11 @@
 from pathlib import Path
 import streamlit as st
 
+try:
+    from utils import google_drive
+except Exception:
+    google_drive = None
+
 BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Hojas de Verificación", layout="wide")
@@ -34,6 +39,22 @@ if "ultimo_paquete_periodo_mixto" not in st.session_state:
     st.session_state.ultimo_paquete_periodo_mixto = False
 if "ultimo_paquete_generado_en" not in st.session_state:
     st.session_state.ultimo_paquete_generado_en = ""
+
+if (
+    google_drive is not None
+    and not st.session_state.google_drive_credentials
+    and not st.session_state.google_drive_restaure_intentado
+):
+    st.session_state.google_drive_restaure_intentado = True
+    cargar_token_local = getattr(google_drive, "cargar_token_oauth_local", None)
+    if callable(cargar_token_local):
+        token_local = cargar_token_local()
+        if token_local:
+            credenciales = token_local.get("credenciales") or {}
+            usuario = token_local.get("usuario") or {}
+            if credenciales:
+                st.session_state.google_drive_credentials = credenciales
+                st.session_state.google_drive_usuario = usuario
 
 inventario_cargado = st.session_state.inventario_df is not None
 informacion_usuario_completa = bool(

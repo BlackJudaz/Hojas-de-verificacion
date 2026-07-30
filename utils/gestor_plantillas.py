@@ -746,6 +746,8 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
             if os.path.exists(ruta_pdf):
                 zip_file.write(ruta_pdf, arcname="etiquetas_mantenimiento.pdf")
                 os.remove(ruta_pdf)
+            else:
+                errores.append("No se pudo generar el PDF de etiquetas.")
 
         status_text.empty()
 
