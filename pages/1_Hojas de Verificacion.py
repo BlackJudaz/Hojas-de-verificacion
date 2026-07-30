@@ -32,7 +32,50 @@ config = {
     "jefe":     st.session_state.get("nombre_jefe", ""),
     "hospital": st.session_state.get("nombre_hospital", ""),
 }
+@st.fragment(run_every="2s" if st.session_state.get("google_drive_auth_url") and not st.session_state.get("google_drive_credentials") else None)
+def _seccion_drive(contenido_zip):
+    if not st.session_state.get("google_drive_credentials"):
+        _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=False)
 
+    st.caption("Paso 1: conecta tu cuenta de Drive")
+    if st.session_state.get("google_drive_credentials"):
+        usuario = st.session_state.get("google_drive_usuario", {})
+        correo  = usuario.get("emailAddress", "")
+        if correo:
+            st.success(f"Sesión iniciada: {correo}")
+        else:
+            st.success("Sesión de Drive iniciada")
+        if st.button("Cerrar sesión de Drive", use_container_width=True, key="btn_cerrar_sesion_drive"):
+            st.session_state.google_drive_credentials = None
+            st.session_state.google_drive_usuario = {}
+            st.session_state.google_drive_auth_url = ""
+            st.session_state.google_drive_login_state = ""
+            st.session_state.google_oauth_state = ""
+            st.session_state.google_oauth_flow_config = None
+            st.session_state.ultimo_drive_folder_link = ""
+            st.rerun()
+    else:
+        if st.button("1) Iniciar sesión en Drive", use_container_width=True):
+            _iniciar_sesion_drive()
+            st.rerun()
+
+        auth_url = st.session_state.get("google_drive_auth_url", "")
+        if auth_url:
+            st.markdown(
+                f"<a href='{auth_url}' target='_blank' rel='noopener noreferrer' style='display:block;text-align:center;padding:0.45rem 0.75rem;border:1px solid rgba(151,166,195,0.35);border-radius:0.5rem;text-decoration:none;'>Continuar con Google (nueva pestaña)</a>",
+                unsafe_allow_html=True,
+            )
+            st.info("Autoriza en Google. Esta sección se actualizará sola.")
+
+    st.caption("Paso 2: sube el paquete")
+    if st.session_state.get("google_drive_credentials"):
+        if st.button("☁️ Subir a Drive", use_container_width=True, type="primary"):
+            _subir_a_drive(contenido_zip)
+    else:
+        if st.session_state.get("google_drive_auth_url"):
+            st.info("Esperando autorización de Google para habilitar la subida...")
+        else:
+            st.info("Primero inicia sesión para habilitar la subida.")
 
 def _contar_archivos_en_zip(contenido_zip):
     try:
@@ -268,18 +311,16 @@ def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
     from utils import google_drive
 
     estado = st.session_state.get("google_drive_login_state", "") or st.session_state.get("google_oauth_state", "")
-    resultado = None
+    if not estado:
+        if mostrar_mensajes:
+            st.warning("No hay una autenticación pendiente para sincronizar.")
+        return False
+
     obtener_resultado = getattr(google_drive, "obtener_resultado_oauth", None)
-    if callable(obtener_resultado) and estado:
-        resultado = obtener_resultado(estado, consume=True)
+    resultado = obtener_resultado(estado, consume=True) if callable(obtener_resultado) else None
 
     if not resultado:
-        obtener_ultimo_resultado = getattr(google_drive, "obtener_ultimo_resultado_oauth", None)
-        if callable(obtener_ultimo_resultado):
-            resultado = obtener_ultimo_resultado(consume=True)
-
-    if not resultado:
-        if mostrar_mensajes and not estado:
+        if mostrar_mensajes:
             st.warning("No hay una autenticación pendiente para sincronizar.")
         return False
 
@@ -299,13 +340,9 @@ def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
     st.session_state.google_drive_usuario = resultado.get("usuario") or {}
     st.session_state.google_drive_auth_url = ""
     st.session_state.google_drive_login_state = ""
-    guardar_token_local = getattr(google_drive, "guardar_token_oauth_local", None)
-    if callable(guardar_token_local):
-        guardar_token_local(st.session_state.google_drive_credentials, st.session_state.google_drive_usuario)
     if mostrar_mensajes:
         st.success("Sesión de Drive sincronizada. Ya puedes subir el paquete.")
     return True
-
 
 def _actualizar_estado_drive_desde_oauth():
     # Flujo estable: intentar sincronizar resultado OAuth y, si no aparece,
@@ -353,7 +390,6 @@ def _activar_polling_drive_si_pendiente():
 
     time.sleep(2)
     st.rerun()
-
 def _restaurar_sesion_drive_desde_token_local():
     from utils import google_drive
 
@@ -1208,53 +1244,17 @@ with st.container(border=True):
     nombre_zip    = st.session_state.get("ultimo_paquete_zip_nombre", "")
 
     if contenido_zip and nombre_zip:
-        st.divider()
-        col_descargar, col_drive = st.columns(2)
+            st.divider()
+            col_descargar, col_drive = st.columns(2)
 
-        with col_descargar:
-            st.download_button(
-                label               = "⬇️ Descargar Paquete (.zip)",
-                data                = contenido_zip,
-                file_name           = nombre_zip,
-                mime                = "application/zip",
-                use_container_width = True,
-            )
+            with col_descargar:
+                st.download_button(
+                    label               = "⬇️ Descargar Paquete (.zip)",
+                    data                = contenido_zip,
+                    file_name           = nombre_zip,
+                    mime                = "application/zip",
+                    use_container_width = True,
+                )
 
-        with col_drive:
-            st.caption("Paso 1: conecta tu cuenta de Drive")
-            if st.session_state.get("google_drive_credentials"):
-                usuario = st.session_state.get("google_drive_usuario", {})
-                correo  = usuario.get("emailAddress", "")
-                if correo:
-                    st.success(f"Sesión iniciada: {correo}")
-            else:
-                if st.button("1) Iniciar sesión en Drive", use_container_width=True):
-                    _iniciar_sesion_drive()
-
-                auth_url = st.session_state.get("google_drive_auth_url", "")
-                if auth_url:
-                    st.markdown(
-                        f"<a href='{auth_url}' target='_blank' rel='noopener noreferrer' style='display:block;text-align:center;padding:0.45rem 0.75rem;border:1px solid rgba(151,166,195,0.35);border-radius:0.5rem;text-decoration:none;'>Continuar con Google (nueva pestaña)</a>",
-                        unsafe_allow_html=True,
-                    )
-                    st.info("Autoriza en Google. Esta pestaña detectará la sesión automáticamente.")
-
-            st.caption("Paso 2: sube el paquete")
-            if st.session_state.get("google_drive_credentials"):
-                if st.button("☁️ Subir a Drive", use_container_width=True, type="primary"):
-                    _subir_a_drive(contenido_zip)
-            else:
-                if st.session_state.get("google_drive_auth_url"):
-                    st.info("Esperando autorización de Google para habilitar la subida...")
-                else:
-                    st.info("Primero inicia sesión para habilitar la subida.")
-
-            st.caption("Paso 3: abre la carpeta destino")
-            drive_folder_link = st.session_state.get("ultimo_drive_folder_link", "")
-            drive_folder_path = st.session_state.get("ultimo_paquete_drive_folder", "")
-            if drive_folder_link:
-                if drive_folder_path:
-                    st.caption(f"Destino en Drive: {drive_folder_path}")
-                st.link_button("📂 Ir al link en Drive", drive_folder_link, use_container_width=True)
-            else:
-                st.info("El link aparecerá cuando termine la subida.")
+            with col_drive:
+                _seccion_drive(contenido_zip)

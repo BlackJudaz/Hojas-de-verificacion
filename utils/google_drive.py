@@ -94,54 +94,29 @@ def _expirado(payload, ttl_segundos):
 
 
 def guardar_token_oauth_local(credenciales_info, usuario=None):
-    if not isinstance(credenciales_info, dict) or not credenciales_info:
-        return False
-
-    payload = {
-        "ts": time.time(),
-        "credenciales": dict(credenciales_info),
-        "usuario": dict(usuario or {}),
-    }
-
-    try:
-        _OAUTH_TOKEN_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _OAUTH_TOKEN_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-        return True
-    except Exception:
-        return False
+    # Deshabilitado a propósito: la app la usan muchos correos distintos.
+    # Persistir el token en un archivo compartido del servidor haría que
+    # cualquier usuario que recargue la página heredara la sesión de Drive
+    # de otra persona. Cada sesión de navegador debe autenticarse por su cuenta.
+    return False
 
 
 def cargar_token_oauth_local():
-    if not _OAUTH_TOKEN_STORE_PATH.exists() or not _OAUTH_TOKEN_STORE_PATH.is_file():
-        return None
-
-    try:
-        payload = json.loads(_OAUTH_TOKEN_STORE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    credenciales = payload.get("credenciales") if isinstance(payload, dict) else None
-    if not isinstance(credenciales, dict) or not credenciales:
-        return None
-
-    usuario = payload.get("usuario") if isinstance(payload.get("usuario"), dict) else {}
-    return {
-        "credenciales": credenciales,
-        "usuario": usuario,
-    }
+    # Deshabilitado: ver nota en guardar_token_oauth_local().
+    return None
 
 
 def limpiar_token_oauth_local():
+    # Por seguridad, si existiera un token viejo de una versión anterior
+    # del código, lo borra al primer uso; no vuelve a escribir ninguno.
     try:
         if _OAUTH_TOKEN_STORE_PATH.exists():
             _OAUTH_TOKEN_STORE_PATH.unlink()
-        # Compatibilidad: limpia también la ruta histórica dentro del repo.
         if _OAUTH_TOKEN_PATH.exists():
             _OAUTH_TOKEN_PATH.unlink()
         return True
     except Exception:
         return False
-
 
 def _limpiar_cache_oauth_expirado():
     ahora = time.time()
@@ -1444,94 +1419,102 @@ def subir_zip_como_documentos(service, contenido_zip, folder_id, service_sheets=
     sheets_disponible = service_sheets
 
     for archivo_zip, info, partes, prefijo_comun in _iterar_entradas_zip_validas(contenido_zip):
-        partes_subida = list(partes)
+            partes_subida = list(partes)
+            partes_originales = list(partes)
 
-        # No crear carpeta contenedora del paquete en Drive.
-        if prefijo_comun and partes_subida and partes_subida[0] == prefijo_comun:
-            partes_subida = partes_subida[1:]
-        elif partes_subida and re.match(r"^reporte[_\- ].*", str(partes_subida[0]), flags=re.IGNORECASE):
-            partes_subida = partes_subida[1:]
+            # No crear carpeta contenedora del paquete en Drive.
+            if prefijo_comun and partes_subida and partes_subida[0] == prefijo_comun:
+                partes_subida = partes_subida[1:]
+            elif partes_subida and re.match(r"^reporte[_\- ].*", str(partes_subida[0]), flags=re.IGNORECASE):
+                partes_subida = partes_subida[1:]
 
-        if not partes_subida:
-            continue
+            if not partes_subida:
+                if info.is_dir():
+                    # Es la carpeta contenedora del paquete; se omite intencionalmente.
+                    continue
+                # Es un archivo cuyo nombre completo coincidía con el "prefijo" detectado
+                # (por ejemplo, un único archivo suelto en la raíz del zip, o un archivo
+                # cuyo nombre empieza con "reporte_"). No se debe perder el archivo:
+                # se conserva su nombre original sin recortar.
+                partes_subida = partes_originales
 
-        if info.is_dir():
+            if info.is_dir():
+                carpeta_actual = folder_id
+                ruta_acumulada = []
+                for parte in partes_subida:
+                    ruta_acumulada.append(parte)
+                    clave = tuple(ruta_acumulada)
+                    if clave in carpetas_cache:
+                        carpeta_actual = carpetas_cache[clave]
+                        continue
+                    carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
+                    carpeta_actual = carpeta["id"]
+                    carpetas_cache[clave] = carpeta_actual
+                continue
+
             carpeta_actual = folder_id
             ruta_acumulada = []
-            for parte in partes_subida:
+            for parte in partes_subida[:-1]:
                 ruta_acumulada.append(parte)
                 clave = tuple(ruta_acumulada)
-                if clave in carpetas_cache:
-                    carpeta_actual = carpetas_cache[clave]
-                    continue
-                carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
-                carpeta_actual = carpeta["id"]
-                carpetas_cache[clave] = carpeta_actual
-            continue
+                if clave not in carpetas_cache:
+                    carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
+                    carpetas_cache[clave] = carpeta["id"]
+                carpeta_actual = carpetas_cache[clave]
 
-        carpeta_actual = folder_id
-        ruta_acumulada = []
-        for parte in partes_subida[:-1]:
-            ruta_acumulada.append(parte)
-            clave = tuple(ruta_acumulada)
-            if clave not in carpetas_cache:
-                carpeta = obtener_o_crear_carpeta(service, parte, parent_id=carpeta_actual)
-                carpetas_cache[clave] = carpeta["id"]
-            carpeta_actual = carpetas_cache[clave]
-
-        nombre_archivo = str(partes_subida[-1]).strip()
-        nombre_archivo_lower = nombre_archivo.lower()
-        contenido = archivo_zip.read(info.filename)
-        es_pdf = nombre_archivo_lower.endswith(".pdf") or _es_pdf_bytes(contenido)
-        es_excel = nombre_archivo_lower.endswith(".xlsx") or _es_excel_xlsx_bytes(contenido)
-
-        if not es_pdf and not es_excel:
-            continue
-
-        if es_pdf and not nombre_archivo_lower.endswith(".pdf"):
-            nombre_archivo = f"{nombre_archivo}.pdf"
+            nombre_archivo = str(partes_subida[-1]).strip()
             nombre_archivo_lower = nombre_archivo.lower()
-        if es_excel and not nombre_archivo_lower.endswith(".xlsx"):
-            nombre_archivo = f"{nombre_archivo}.xlsx"
-            nombre_archivo_lower = nombre_archivo.lower()
+            contenido = archivo_zip.read(info.filename)
+            es_pdf = nombre_archivo_lower.endswith(".pdf") or _es_pdf_bytes(contenido)
+            es_excel = nombre_archivo_lower.endswith(".xlsx") or _es_excel_xlsx_bytes(contenido)
 
-        mime_type = "application/pdf" if es_pdf else _EXCEL_XLSX_MIME_TYPE
+            if not es_pdf and not es_excel:
+                continue
 
-        if sheets_disponible and mime_type == _EXCEL_XLSX_MIME_TYPE:
-            try:
-                archivo = subir_excel_como_google_sheet(
-                    service,
-                    sheets_disponible,
-                    nombre_archivo,
-                    contenido,
-                    folder_id=carpeta_actual,
-                    usar_nombre_unico=True
-                )
-            except Exception as exc:
-                # Fallback automático: si Sheets API no está habilitada o faltan scopes,
-                # sube el archivo .xlsx normal para no bloquear toda la carga.
-                if es_error_de_scopes_google(exc) or es_error_api_sheets_deshabilitada(exc):
-                    sheets_disponible = None
-                    archivo = subir_archivo_bytes(
+            if es_pdf and not nombre_archivo_lower.endswith(".pdf"):
+                nombre_archivo = f"{nombre_archivo}.pdf"
+                nombre_archivo_lower = nombre_archivo.lower()
+            if es_excel and not nombre_archivo_lower.endswith(".xlsx"):
+                nombre_archivo = f"{nombre_archivo}.xlsx"
+                nombre_archivo_lower = nombre_archivo.lower()
+
+            mime_type = "application/pdf" if es_pdf else _EXCEL_XLSX_MIME_TYPE
+
+            if sheets_disponible and mime_type == _EXCEL_XLSX_MIME_TYPE:
+                try:
+                    archivo = subir_excel_como_google_sheet(
                         service,
+                        sheets_disponible,
                         nombre_archivo,
                         contenido,
                         folder_id=carpeta_actual,
-                        mime_type=mime_type,
                         usar_nombre_unico=True
                     )
-                    archivo["_checkbox_fallback"] = True
-                else:
-                    raise
-        else:
-            archivo = subir_archivo_bytes(
-                service,
-                nombre_archivo,
-                contenido,
-                folder_id=carpeta_actual,
-                mime_type=mime_type,
-                usar_nombre_unico=True
-            )
-        archivos_subidos.append(archivo)
+                except Exception as exc:
+                    # Fallback automático: si Sheets API no está habilitada o faltan scopes,
+                    # sube el archivo .xlsx normal para no bloquear toda la carga.
+                    if es_error_de_scopes_google(exc) or es_error_api_sheets_deshabilitada(exc):
+                        sheets_disponible = None
+                        archivo = subir_archivo_bytes(
+                            service,
+                            nombre_archivo,
+                            contenido,
+                            folder_id=carpeta_actual,
+                            mime_type=mime_type,
+                            usar_nombre_unico=True
+                        )
+                        archivo["_checkbox_fallback"] = True
+                    else:
+                        raise
+            else:
+                archivo = subir_archivo_bytes(
+                    service,
+                    nombre_archivo,
+                    contenido,
+                    folder_id=carpeta_actual,
+                    mime_type=mime_type,
+                    usar_nombre_unico=True
+                )
+            archivos_subidos.append(archivo)
 
     return archivos_subidos
