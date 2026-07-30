@@ -57,7 +57,7 @@ def _seccion_drive(contenido_zip):
     else:
         if st.button("1) Iniciar sesión en Drive", use_container_width=True):
             _iniciar_sesion_drive()
-            st.rerun()
+            st.rerun(scope="fragment")
 
         auth_url = st.session_state.get("google_drive_auth_url", "")
         if auth_url:
