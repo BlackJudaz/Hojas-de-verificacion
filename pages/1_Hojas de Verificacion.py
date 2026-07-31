@@ -32,7 +32,7 @@ config = {
     "jefe":     st.session_state.get("nombre_jefe", ""),
     "hospital": st.session_state.get("nombre_hospital", ""),
 }
-@st.fragment(run_every="2s" if st.session_state.get("google_drive_auth_url") and not st.session_state.get("google_drive_credentials") else None)
+@st.fragment(run_every="2s")
 def _seccion_drive(contenido_zip):
     if not st.session_state.get("google_drive_credentials"):
         _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=False)
@@ -76,6 +76,18 @@ def _seccion_drive(contenido_zip):
             st.info("Esperando autorización de Google para habilitar la subida...")
         else:
             st.info("Primero inicia sesión para habilitar la subida.")
+
+    resultado_drive = st.session_state.get("ultimo_resultado_drive")
+    if resultado_drive:
+        if resultado_drive.get("tipo") == "exito":
+            st.success(resultado_drive.get("mensaje", ""))
+            if resultado_drive.get("total_fallback", 0) > 0:
+                st.warning(f"{resultado_drive['total_fallback']} archivo(s) se subieron como .xlsx sin conversión a Google Sheets.")
+            if resultado_drive.get("webViewLink"):
+                st.link_button("📁 Abrir carpeta en Google Drive", resultado_drive["webViewLink"],
+                               use_container_width=True, key="btn_abrir_carpeta_drive")
+        else:
+            st.error(resultado_drive.get("mensaje", ""))
 
 def _contar_archivos_en_zip(contenido_zip):
     try:
@@ -122,11 +134,15 @@ def _subir_a_drive(contenido_zip):
     ruta_drive_destino = google_drive.construir_ruta_documentacion(fecha_periodo)
     total_archivos_zip = _contar_archivos_en_zip(contenido_zip)
     if total_archivos_zip == 0:
-        st.error("El paquete no contiene documentos PDF/XLSX para subir. Verifica que se hayan generado hojas o etiquetas.")
+        st.session_state.ultimo_resultado_drive = {
+            "tipo": "error",
+            "mensaje": "El paquete no contiene documentos PDF/XLSX para subir. Verifica que se hayan generado hojas o etiquetas.",
+        }
         return
 
     # Evita mostrar links de una subida previa si esta ejecución falla.
     st.session_state.ultimo_drive_folder_link = ""
+    st.session_state.ultimo_resultado_drive = None
 
     try:
         with st.spinner("Subiendo a Google Drive..."):
@@ -146,20 +162,23 @@ def _subir_a_drive(contenido_zip):
                 guardar_token_local(st.session_state.google_drive_credentials, st.session_state.google_drive_usuario)
 
         if not archivos:
-            st.error("No se subió ningún archivo porque no se encontraron documentos PDF/XLSX válidos en el paquete.")
+            st.session_state.ultimo_resultado_drive = {
+                "tipo": "error",
+                "mensaje": "No se subió ningún archivo porque no se encontraron documentos PDF/XLSX válidos en el paquete.",
+            }
             return
 
-        st.success(f"✅ Se subieron {len(archivos)} documento(s) a {' / '.join(ruta_drive_destino)}")
         st.session_state.ultimo_paquete_drive_folder = " / ".join(ruta_drive_destino)
         st.session_state.ultimo_drive_folder_link = carpeta_destino.get("webViewLink", "")
 
         total_fallback = sum(1 for a in archivos if a.get("_checkbox_fallback"))
-        if total_fallback > 0:
-            st.warning(f"{total_fallback} archivo(s) se subieron como .xlsx sin conversión a Google Sheets.")
 
-        if carpeta_destino.get("webViewLink"):
-            st.link_button("📁 Abrir carpeta en Google Drive", carpeta_destino["webViewLink"],
-                           use_container_width=True)
+        st.session_state.ultimo_resultado_drive = {
+            "tipo": "exito",
+            "mensaje": f"✅ Se subieron {len(archivos)} documento(s) a {' / '.join(ruta_drive_destino)}",
+            "total_fallback": total_fallback,
+            "webViewLink": carpeta_destino.get("webViewLink", ""),
+        }
 
     except Exception as exc:
         from utils import google_drive as gd
@@ -169,13 +188,20 @@ def _subir_a_drive(contenido_zip):
             limpiar_token_local = getattr(gd, "limpiar_token_oauth_local", None)
             if callable(limpiar_token_local):
                 limpiar_token_local()
-            st.error("Los permisos de Drive expiraron. Vuelve a presionar 'Subir a Drive' para reconectarte.")
+            st.session_state.ultimo_resultado_drive = {
+                "tipo": "error",
+                "mensaje": "Los permisos de Drive expiraron. Vuelve a presionar 'Subir a Drive' para reconectarte.",
+            }
         elif gd.es_error_api_sheets_deshabilitada(exc):
-            st.error("Google Sheets API está deshabilitada en tu proyecto de Google Cloud.")
+            st.session_state.ultimo_resultado_drive = {
+                "tipo": "error",
+                "mensaje": "Google Sheets API está deshabilitada en tu proyecto de Google Cloud.",
+            }
         else:
-            st.error(f"No se pudo subir a Google Drive: {exc}")
-
-
+            st.session_state.ultimo_resultado_drive = {
+                "tipo": "error",
+                "mensaje": f"No se pudo subir a Google Drive: {exc}",
+            }
 def _finalizar_oauth_drive_si_regreso():
     """Completa OAuth cuando Google regresa con ?code=..."""
     from utils import google_drive
@@ -362,34 +388,7 @@ def _detectar_sesion_drive_automatica():
     return bool(sincronizado or restaurado)
 
 
-def _activar_polling_drive_si_pendiente():
-    if st.session_state.get("google_drive_credentials"):
-        return
 
-    if not st.session_state.get("google_drive_auth_url"):
-        return
-
-    fragment_api = getattr(st, "fragment", None)
-    if callable(fragment_api):
-        try:
-            @fragment_api(run_every="2s")
-            def _poll_drive_session():
-                if _detectar_sesion_drive_automatica():
-                    st.rerun()
-
-            _poll_drive_session()
-            return
-        except TypeError:
-            # Esta versión de Streamlit no soporta run_every en fragmentos.
-            pass
-
-    # Fallback universal: reintenta cada 2s con rerun completo del app.
-    # Se detiene solo en cuanto haya credenciales (ver el return del inicio).
-    if _detectar_sesion_drive_automatica():
-        st.rerun()
-
-    time.sleep(2)
-    st.rerun()
 def _restaurar_sesion_drive_desde_token_local():
     from utils import google_drive
 
@@ -465,6 +464,7 @@ def inicializar_estado():
         "ultimo_paquete_zip_nombre":        "",
         "ultimo_paquete_drive_folder":      "",
         "ultimo_drive_folder_link":         "",
+        "ultimo_resultado_drive":           None,
         "ultimo_paquete_periodo":           "",
         "ultimo_paquete_periodo_mixto":     False,
         "ultimo_paquete_generado_en":       "",
@@ -566,7 +566,6 @@ if not st.session_state.get("google_drive_credentials"):
 
 st.title("Generador de Hojas de Verificación")
 st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
-_activar_polling_drive_si_pendiente()
 _entro_desde_otra_pagina = _marcar_entrada_pagina_hojas()
 _restaurar_widgets_filtro_desde_estado(forzar=_entro_desde_otra_pagina)
 
