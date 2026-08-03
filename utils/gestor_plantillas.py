@@ -644,6 +644,24 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
     if analizadores_seleccionados is None:
         analizadores_seleccionados = []
 
+    total_pasos = 0
+    pasos_completados = 0
+
+    def _mostrar_estado(mensaje):
+        if status_text is not None:
+            status_text.text(mensaje)
+
+    def _avanzar_progreso(mensaje=None, pasos=1):
+        nonlocal pasos_completados
+        if mensaje:
+            _mostrar_estado(mensaje)
+        pasos_completados += pasos
+        if progress_bar is not None:
+            if total_pasos > 0:
+                progress_bar.progress(min(pasos_completados / total_pasos, 1.0))
+            else:
+                progress_bar.progress(1.0)
+
     with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
         if hacer_hojas:
             try:
@@ -651,34 +669,51 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                 pestañas_base = set(wb_base.sheetnames)
                 wb_base.close()
             except Exception as e:
-                status_text.empty()
+                if status_text is not None:
+                    status_text.empty()
                 return buffer_zip, [f"No se pudo abrir la plantilla base: {e}"], 0
 
             equipos_por_concepto = {}
             conceptos_sin_plantilla = set()
             conceptos_pestana_faltante = set()
+            registros_omitidos = []
 
-            for idx, (_, row) in enumerate(equipos.iterrows()):
-                activo   = row.get("# ACTIVO", "SIN_ACTIVO")
-                concepto = row.get("CONCEPTO", "SIN_CONCEPTO")
-                status_text.text(f"Procesando: {activo}")
+            for _, row in equipos.iterrows():
+                equipo_dict = row.to_dict()
+                activo = equipo_dict.get("# ACTIVO", "SIN_ACTIVO")
+                concepto = equipo_dict.get("CONCEPTO", "SIN_CONCEPTO")
                 pestana = obtener_pestana(concepto)
 
                 if pestana is None:
                     if concepto not in conceptos_sin_plantilla:
                         conceptos_sin_plantilla.add(concepto)
                         errores.append(f"{concepto} no tiene una lista de verificación asignada.")
-                    progress_bar.progress((idx + 1) / len(equipos))
+                    registros_omitidos.append((activo, concepto, "sin_plantilla"))
                     continue
+
                 if pestana not in pestañas_base:
                     if concepto not in conceptos_pestana_faltante:
                         conceptos_pestana_faltante.add(concepto)
                         errores.append(f"El tipo de activo {concepto} apunta a '{pestana}' que no existe.")
-                    progress_bar.progress((idx + 1) / len(equipos))
+                    registros_omitidos.append((activo, concepto, "pestana_faltante"))
                     continue
+
                 equipos_por_concepto.setdefault(concepto, {"pestana": pestana, "equipos": []})
-                equipos_por_concepto[concepto]["equipos"].append(row.to_dict())
-                progress_bar.progress((idx + 1) / len(equipos))
+                equipos_por_concepto[concepto]["equipos"].append(equipo_dict)
+
+            total_equipos_validos = sum(len(data["equipos"]) for data in equipos_por_concepto.values())
+            total_pasos += len(registros_omitidos) + total_equipos_validos + len(equipos_por_concepto)
+
+            if progress_bar is not None:
+                progress_bar.progress(0.0)
+
+            for activo, _, motivo in registros_omitidos:
+                mensaje = f"Omitiendo: {activo}"
+                if motivo == "pestana_faltante":
+                    mensaje = f"Omitiendo por plantilla faltante: {activo}"
+                elif motivo == "sin_plantilla":
+                    mensaje = f"Omitiendo sin plantilla asignada: {activo}"
+                _avanzar_progreso(mensaje)
 
             for concepto, data in equipos_por_concepto.items():
                 pestana      = data["pestana"]
@@ -702,6 +737,7 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                     activo_equipo = equipo_dict.get("# ACTIVO", "SIN_ACTIVO")
                     analizadores_equipo = analizadores_por_concepto.get(concepto, [])
                     try:
+                        _mostrar_estado(f"Generando hoja: {activo_equipo}")
                         ws_base   = wb_concepto[pestana]
                         ws_equipo = wb_concepto.copy_worksheet(ws_base)
                         _copiar_imagenes_hoja(ws_base, ws_equipo)
@@ -714,6 +750,8 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                         exitos += 1
                     except Exception as e:
                         errores.append(f"Error en {activo_equipo}: {e}")
+                    finally:
+                        _avanzar_progreso(f"Procesado: {activo_equipo}")
 
                 if hojas_generadas:
                     for hoja in hojas_plantilla:
@@ -734,22 +772,40 @@ def crear_paquete_reporte(equipos, nombre_carpeta, ingeniero, jefe=None, hospita
                     if os.path.exists(ruta_concepto):
                         os.remove(ruta_concepto)
 
+                    _avanzar_progreso(f"Empaquetado: {tipo_equipo}")
+                else:
+                    _avanzar_progreso(f"Sin hojas válidas para: {tipo_equipo}")
+
                 try:
                     wb_concepto.close()
                 except Exception:
                     pass
 
         if hacer_etiquetas:
-            status_text.text("Generando etiquetas PDF...")
-            ruta_pdf = crear_etiquetas_pdf(equipos, ingeniero,
-                                           fecha_mantenimiento_base=fecha_mantenimiento_base)
+            total_pasos += len(equipos) + 1
+            if progress_bar is not None and pasos_completados == 0:
+                progress_bar.progress(0.0)
+
+            def _progreso_etiquetas(mensaje=None):
+                _avanzar_progreso(mensaje)
+
+            ruta_pdf = crear_etiquetas_pdf(
+                equipos,
+                ingeniero,
+                fecha_mantenimiento_base=fecha_mantenimiento_base,
+                progreso_callback=_progreso_etiquetas,
+            )
             if os.path.exists(ruta_pdf):
                 zip_file.write(ruta_pdf, arcname="etiquetas_mantenimiento.pdf")
                 os.remove(ruta_pdf)
             else:
                 errores.append("No se pudo generar el PDF de etiquetas.")
 
-        status_text.empty()
+        if progress_bar is not None:
+            progress_bar.progress(1.0)
+
+        if status_text is not None:
+            status_text.empty()
 
     buffer_zip.seek(0)
     return buffer_zip, errores, exitos
@@ -778,7 +834,7 @@ def _ajustar_texto_a_ancho(canvas_obj, texto, fuente, tamano, ancho_maximo, sufi
     return ""
 
 
-def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
+def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None, progreso_callback=None):
     RUTA_PDF = os.path.join(RUTA_REPORTES, "etiquetas_mantenimiento.pdf")
     os.makedirs(RUTA_REPORTES, exist_ok=True)
 
@@ -922,7 +978,10 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
             c.showPage()
 
     for _, row in equipos.iterrows():
+        activo = str(row.get("# ACTIVO", "SIN_ACTIVO") or "SIN_ACTIVO").strip()
         _dibujar_etiqueta_en_posicion(row)
+        if callable(progreso_callback):
+            progreso_callback(f"Generando etiqueta: {activo}")
 
     # Completa la ultima pagina con etiquetas en blanco para no desperdiciar la hoja.
     if col_actual != 0 or fila_actual != 0:
@@ -930,4 +989,6 @@ def crear_etiquetas_pdf(equipos, ingeniero=None, fecha_mantenimiento_base=None):
             _dibujar_etiqueta_en_posicion(None)
 
     c.save()
+    if callable(progreso_callback):
+        progreso_callback("Empaquetando etiquetas PDF")
     return RUTA_PDF

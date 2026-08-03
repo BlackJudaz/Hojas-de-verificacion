@@ -1,11 +1,13 @@
 # pages/Hojas de Verificacion.py
 import re
 import json
+import hashlib
 import zipfile
 from io import BytesIO
 import streamlit as st
 import pandas as pd
 import time
+import streamlit.components.v1 as components
 from datetime import datetime, date
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
@@ -32,6 +34,40 @@ config = {
     "jefe":     st.session_state.get("nombre_jefe", ""),
     "hospital": st.session_state.get("nombre_hospital", ""),
 }
+
+
+def _abrir_url_google_drive(auth_url):
+    if not auth_url:
+        return
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const width = 560;
+            const height = 720;
+            const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+            const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+            const features = [
+                'popup=yes',
+                'toolbar=no',
+                'menubar=no',
+                'location=yes',
+                'status=no',
+                'resizable=yes',
+                'scrollbars=yes',
+                'width=' + width,
+                'height=' + height,
+                'left=' + left,
+                'top=' + top
+            ].join(',');
+            window.open({json.dumps(auth_url)}, 'google_drive_oauth', features);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 @st.fragment(run_every="2s")
 def _seccion_drive(contenido_zip):
     if not st.session_state.get("google_drive_credentials"):
@@ -57,15 +93,15 @@ def _seccion_drive(contenido_zip):
     else:
         if st.button("1) Iniciar sesión en Drive", use_container_width=True):
             _iniciar_sesion_drive()
+            st.session_state._drive_popup_pendiente = True
             st.rerun(scope="fragment")
 
         auth_url = st.session_state.get("google_drive_auth_url", "")
         if auth_url:
-            st.markdown(
-                f"<a href='{auth_url}' target='_blank' rel='noopener noreferrer' style='display:block;text-align:center;padding:0.45rem 0.75rem;border:1px solid rgba(151,166,195,0.35);border-radius:0.5rem;text-decoration:none;'>Continuar con Google (nueva pestaña)</a>",
-                unsafe_allow_html=True,
-            )
-            st.info("Autoriza en Google. Esta sección se actualizará sola.")
+            if st.session_state.get("_drive_popup_pendiente", False):
+                _abrir_url_google_drive(auth_url)
+                st.session_state._drive_popup_pendiente = False
+      #      st.info("Autoriza en Google. Esta sección se actualizará sola.")
 
     st.caption("Paso 2: sube el paquete")
     if st.session_state.get("google_drive_credentials"):
@@ -270,11 +306,20 @@ def _finalizar_oauth_drive_si_regreso():
         if flow_config:
             st.session_state.google_oauth_state = state
             st.session_state.google_oauth_flow_config = flow_config
+
     if expected_state and state and state != expected_state:
-        st.session_state.google_drive_auth_url = ""
-        st.query_params.clear()
-        _pantalla_cerrar_pestana("Cierre esta pestaña")
-        return True
+        obtener_flow_config = getattr(google_drive, "obtener_flow_config_oauth", None)
+        flow_config_state_actual = obtener_flow_config(state) if callable(obtener_flow_config) else None
+        if flow_config_state_actual and flow_config_state_actual.get("code_verifier"):
+            flow_config = flow_config_state_actual
+            st.session_state.google_oauth_state = state
+            st.session_state.google_oauth_flow_config = flow_config_state_actual
+            expected_state = state
+        else:
+            st.session_state.google_drive_auth_url = ""
+            st.query_params.clear()
+            _pantalla_cerrar_pestana("Cierre esta pestaña")
+            return True
 
     if not flow_config or not flow_config.get("code_verifier"):
         st.session_state.google_drive_auth_url = ""
@@ -337,13 +382,15 @@ def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
     from utils import google_drive
 
     estado = st.session_state.get("google_drive_login_state", "") or st.session_state.get("google_oauth_state", "")
-    if not estado:
-        if mostrar_mensajes:
-            st.warning("No hay una autenticación pendiente para sincronizar.")
-        return False
-
     obtener_resultado = getattr(google_drive, "obtener_resultado_oauth", None)
-    resultado = obtener_resultado(estado, consume=True) if callable(obtener_resultado) else None
+    obtener_ultimo_resultado = getattr(google_drive, "obtener_ultimo_resultado_oauth", None)
+
+    resultado = None
+    if estado and callable(obtener_resultado):
+        resultado = obtener_resultado(estado, consume=True)
+
+    if not resultado and callable(obtener_ultimo_resultado):
+        resultado = obtener_ultimo_resultado(consume=True)
 
     if not resultado:
         if mostrar_mensajes:
@@ -354,6 +401,7 @@ def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
     if error_oauth:
         st.session_state.google_drive_auth_url = ""
         st.session_state.google_drive_login_state = ""
+        st.session_state.google_oauth_state = ""
         if mostrar_mensajes:
             st.error(f"No se pudo completar la autenticación de Google: {error_oauth}")
         return False
@@ -366,6 +414,7 @@ def _sincronizar_sesion_drive_desde_otra_pestana(mostrar_mensajes=True):
     st.session_state.google_drive_usuario = resultado.get("usuario") or {}
     st.session_state.google_drive_auth_url = ""
     st.session_state.google_drive_login_state = ""
+    st.session_state.google_oauth_state = ""
     if mostrar_mensajes:
         st.success("Sesión de Drive sincronizada. Ya puedes subir el paquete.")
     return True
@@ -485,6 +534,14 @@ def inicializar_estado():
         "_selector_ids_visibles":           [],
         "_selector_grid_key_rendered":      "",
         "_selector_df_editor":             None,
+        "_selector_autoseleccion_pendiente": False,
+        "_pending_ui_filtros":             {},
+        "conceptos_descartados":           [],
+        "_sincronizar_filtros_pendiente":  False,
+        "tinc_filtros_automaticos":        {},
+        "_drive_popup_pendiente":          False,
+        "_generar_paquete_pendiente":      False,
+        "_generar_paquete_request":        {},
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -508,6 +565,24 @@ def limpiar_filtros():
     st.session_state["_selector_sincronizar_visual"] = False
     st.session_state["_selector_limpiar_visual"] = False
     st.session_state["_selector_ids_visibles"] = []
+    st.session_state["_selector_autoseleccion_pendiente"] = False
+    st.session_state["_pending_ui_filtros"] = {}
+
+
+def _programar_actualizacion_widgets_filtro(**actualizaciones):
+    pendientes = dict(st.session_state.get("_pending_ui_filtros", {}))
+    for key, value in actualizaciones.items():
+        pendientes[key] = list(value) if isinstance(value, (list, tuple, set)) else value
+    st.session_state["_pending_ui_filtros"] = pendientes
+
+
+def _aplicar_actualizaciones_widgets_pendientes():
+    pendientes = dict(st.session_state.get("_pending_ui_filtros", {}))
+    if not pendientes:
+        return
+    for key, value in pendientes.items():
+        st.session_state[key] = value
+    st.session_state["_pending_ui_filtros"] = {}
 
 
 def _marcar_entrada_pagina_hojas():
@@ -539,10 +614,45 @@ def _restaurar_widgets_filtro_desde_estado(forzar=False):
 
 
 def _sincronizar_filtros_desde_widgets():
-    st.session_state.filtro_tipo_activo_display = list(st.session_state.get("ui_filtro_tipo_activo_display", []))
-    st.session_state.filtro_marca = list(st.session_state.get("ui_filtro_marca", []))
-    st.session_state.filtro_activo = list(st.session_state.get("ui_filtro_activo", []))
-    st.session_state.filtro_ubicacion = list(st.session_state.get("ui_filtro_ubicacion", []))
+    ui_tipos = list(st.session_state.get("ui_filtro_tipo_activo_display", []))
+    if (
+        st.session_state.get("_selector_autoseleccion_pendiente", False)
+        and not ui_tipos
+        and st.session_state.get("filtro_tipo_activo_display")
+    ):
+        ui_tipos = list(st.session_state.get("filtro_tipo_activo_display", []))
+        st.session_state.ui_filtro_tipo_activo_display = list(ui_tipos)
+    st.session_state.filtro_tipo_activo_display = ui_tipos
+
+    ui_marcas = list(st.session_state.get("ui_filtro_marca", []))
+    if (
+        st.session_state.get("_selector_autoseleccion_pendiente", False)
+        and not ui_marcas
+        and st.session_state.get("filtro_marca")
+    ):
+        ui_marcas = list(st.session_state.get("filtro_marca", []))
+        st.session_state.ui_filtro_marca = list(ui_marcas)
+    st.session_state.filtro_marca = ui_marcas
+
+    ui_activos = list(st.session_state.get("ui_filtro_activo", []))
+    if (
+        st.session_state.get("_selector_autoseleccion_pendiente", False)
+        and not ui_activos
+        and st.session_state.get("filtro_activo")
+    ):
+        ui_activos = list(st.session_state.get("filtro_activo", []))
+        st.session_state.ui_filtro_activo = list(ui_activos)
+    st.session_state.filtro_activo = ui_activos
+
+    ui_ubicaciones = list(st.session_state.get("ui_filtro_ubicacion", []))
+    if (
+        st.session_state.get("_selector_autoseleccion_pendiente", False)
+        and not ui_ubicaciones
+        and st.session_state.get("filtro_ubicacion")
+    ):
+        ui_ubicaciones = list(st.session_state.get("filtro_ubicacion", []))
+        st.session_state.ui_filtro_ubicacion = list(ui_ubicaciones)
+    st.session_state.filtro_ubicacion = ui_ubicaciones
 
 
 def _clave(concepto):
@@ -553,6 +663,154 @@ def _total_analizadores(concepto):
     bel     = [x for x in st.session_state.analizadores_bel_por_concepto.get(concepto, []) if x]
     propios = st.session_state.analizadores_propios_por_concepto.get(concepto, [])
     return len(bel) + len(propios)
+
+
+def _descartar_concepto_del_flujo(concepto, df_inventario):
+    """Descarta un tipo de activo de selección, filtros y configuración de tarjetas."""
+    if df_inventario is None or COLUMNA_ID not in df_inventario.columns or "CONCEPTO" not in df_inventario.columns:
+        return
+
+    mask_concepto = df_inventario["CONCEPTO"].astype(str) == str(concepto)
+    ids_descartar = set(
+        df_inventario.loc[mask_concepto, COLUMNA_ID]
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .tolist()
+    )
+
+    ids_actuales = set(str(x).strip() for x in st.session_state.get("ids_equipos_seleccionados", []) if str(x).strip())
+    ids_nuevos = sorted(ids_actuales - ids_descartar)
+    st.session_state.ids_equipos_seleccionados = ids_nuevos
+
+    valores_filtro_activo = [str(x).strip() for x in st.session_state.get("filtro_activo", []) if str(x).strip()]
+    filtro_activo_nuevo = [v for v in valores_filtro_activo if v not in ids_descartar]
+    st.session_state.filtro_activo = filtro_activo_nuevo
+    _programar_actualizacion_widgets_filtro(ui_filtro_activo=filtro_activo_nuevo)
+
+    conceptos_filtrados = [str(x) for x in st.session_state.get("filtro_concepto", [])]
+    st.session_state.filtro_concepto = [c for c in conceptos_filtrados if c != str(concepto)]
+
+    concepto_norm = normalizar_texto(concepto)
+    displays_filtro = [str(x) for x in st.session_state.get("filtro_tipo_activo_display", [])]
+    filtro_tipo_display_nuevo = [d for d in displays_filtro if normalizar_texto(d) != concepto_norm]
+    st.session_state.filtro_tipo_activo_display = filtro_tipo_display_nuevo
+    _programar_actualizacion_widgets_filtro(ui_filtro_tipo_activo_display=filtro_tipo_display_nuevo)
+
+    st.session_state.periodicidad_por_concepto.pop(concepto, None)
+    st.session_state.tiempo_mantenimiento_por_concepto.pop(concepto, None)
+    st.session_state.fecha_mantenimiento_por_concepto.pop(concepto, None)
+    st.session_state.analizadores_bel_por_concepto.pop(concepto, None)
+    st.session_state.analizadores_propios_por_concepto.pop(concepto, None)
+
+    descartados = [str(x) for x in st.session_state.get("conceptos_descartados", [])]
+    if str(concepto) not in descartados:
+        descartados.append(str(concepto))
+    st.session_state.conceptos_descartados = descartados
+
+    st.session_state["_selector_autoseleccion_pendiente"] = False
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+    st.session_state["_selector_grid_key_rendered"] = ""
+    st.session_state["_selector_ids_visibles"] = []
+    st.session_state.pop("_selector_cache_clave", None)
+    st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_df_editor"] = None
+    st.session_state.clic_buscar = bool(ids_nuevos)
+
+
+def _sincronizar_filtros_con_seleccion(df_inventario):
+    """Sincroniza filtros superiores según los activos seleccionados actualmente."""
+    if df_inventario is None or COLUMNA_ID not in df_inventario.columns:
+        return 0
+
+    ids_sel = sorted(
+        {
+            str(x).strip()
+            for x in st.session_state.get("ids_equipos_seleccionados", [])
+            if str(x).strip()
+        }
+    )
+    if not ids_sel:
+        return 0
+
+    df_sel = df_inventario[df_inventario[COLUMNA_ID].astype(str).isin(ids_sel)].copy()
+    if df_sel.empty:
+        return 0
+
+    marcas = sorted(df_sel["MARCA"].dropna().astype(str).unique().tolist()) if "MARCA" in df_sel.columns else []
+    ubicaciones = sorted(df_sel["UBICACIÓN"].dropna().astype(str).unique().tolist()) if "UBICACIÓN" in df_sel.columns else []
+    conceptos = sorted(df_sel["CONCEPTO"].dropna().astype(str).unique().tolist()) if "CONCEPTO" in df_sel.columns else []
+
+    conceptos_display = []
+    for concepto in conceptos:
+        clave_disp = normalizar_texto(concepto)
+        if clave_disp and clave_disp not in conceptos_display:
+            conceptos_display.append(clave_disp)
+
+    st.session_state.filtro_activo = list(ids_sel)
+    st.session_state.filtro_marca = list(marcas)
+    st.session_state.filtro_ubicacion = list(ubicaciones)
+    st.session_state.filtro_concepto = list(conceptos)
+    st.session_state.filtro_tipo_activo_display = list(conceptos_display)
+    st.session_state.ui_filtro_activo = list(ids_sel)
+    st.session_state.ui_filtro_marca = list(marcas)
+    st.session_state.ui_filtro_ubicacion = list(ubicaciones)
+    st.session_state.ui_filtro_tipo_activo_display = list(conceptos_display)
+
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+    st.session_state["_selector_grid_key_rendered"] = ""
+    st.session_state["_selector_ids_visibles"] = []
+    st.session_state.pop("_selector_cache_clave", None)
+    st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_df_editor"] = None
+    st.session_state.clic_buscar = True
+    return len(ids_sel)
+
+
+def _reaplicar_filtros_automaticos_tinc():
+    filtros_auto = dict(st.session_state.get("tinc_filtros_automaticos", {}))
+    ids_sel = list(filtros_auto.get("ids", []))
+    if not ids_sel:
+        return 0
+
+    st.session_state.ids_equipos_seleccionados = list(ids_sel)
+    st.session_state.filtro_activo = list(ids_sel)
+    st.session_state.filtro_marca = list(filtros_auto.get("marcas", []))
+    st.session_state.filtro_ubicacion = list(filtros_auto.get("ubicaciones", []))
+    st.session_state.filtro_concepto = list(filtros_auto.get("conceptos", []))
+    st.session_state.filtro_tipo_activo_display = list(filtros_auto.get("conceptos_display", []))
+    st.session_state.ui_filtro_activo = list(ids_sel)
+    st.session_state.ui_filtro_marca = list(filtros_auto.get("marcas", []))
+    st.session_state.ui_filtro_ubicacion = list(filtros_auto.get("ubicaciones", []))
+    st.session_state.ui_filtro_tipo_activo_display = list(filtros_auto.get("conceptos_display", []))
+    st.session_state["_selector_autoseleccion_pendiente"] = True
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+    st.session_state["_selector_grid_key_rendered"] = ""
+    st.session_state["_selector_ids_visibles"] = []
+    st.session_state.pop("_selector_cache_clave", None)
+    st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_df_editor"] = None
+    st.session_state.clic_buscar = True
+    return len(ids_sel)
+
+
+def _obtener_ids_operativos(df_inventario, filtros_actuales):
+    """Retorna los ids seleccionados que además siguen cumpliendo los filtros activos."""
+    if df_inventario is None or COLUMNA_ID not in df_inventario.columns:
+        return set()
+
+    ids_seleccionados = {
+        str(x).strip()
+        for x in st.session_state.get("ids_equipos_seleccionados", [])
+        if str(x).strip()
+    }
+    if not ids_seleccionados:
+        return set()
+
+    df_filtrado = aplicar_filtros(df_inventario, filtros_actuales)
+    ids_filtrados = set(df_filtrado[COLUMNA_ID].astype(str).str.strip()) if COLUMNA_ID in df_filtrado.columns else set()
+    return ids_seleccionados & ids_filtrados
 
 
 # ── Inicio de la página ──────────────────────────────────────────────────────
@@ -568,6 +826,7 @@ st.title("Generador de Hojas de Verificación")
 st.caption("Filtra los equipos, selecciona los activos a trabajar y genera el paquete de hojas y etiquetas en un solo flujo.")
 _entro_desde_otra_pagina = _marcar_entrada_pagina_hojas()
 _restaurar_widgets_filtro_desde_estado(forzar=_entro_desde_otra_pagina)
+_aplicar_actualizaciones_widgets_pendientes()
 
 # Al volver desde otra page, fuerza remontaje del grid para rehidratar
 # visualmente checks y sombreado con la seleccion persistida.
@@ -582,6 +841,16 @@ if st.session_state.inventario_df is None:
 
 analizadores_df = _cargar_analizadores_cached()
 df = st.session_state.inventario_df
+
+conceptos_descartados = set(str(x) for x in st.session_state.get("conceptos_descartados", []))
+if conceptos_descartados and "CONCEPTO" in df.columns:
+    df = df[~df["CONCEPTO"].astype(str).isin(conceptos_descartados)].copy()
+
+if st.session_state.get("_sincronizar_filtros_pendiente", False):
+    total_sync = _reaplicar_filtros_automaticos_tinc()
+    if not total_sync:
+        _sincronizar_filtros_con_seleccion(df)
+    st.session_state["_sincronizar_filtros_pendiente"] = False
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 1 — Filtrar
@@ -660,6 +929,9 @@ with main_card:
         if st.button("Buscar", use_container_width=True, type="primary"):
             st.session_state.clic_buscar = True
         st.button("Limpiar", use_container_width=True, on_click=limpiar_filtros)
+        if st.button("Sincronizar filtros", use_container_width=True):
+            st.session_state["_sincronizar_filtros_pendiente"] = True
+            st.rerun()
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASO 2 — Seleccionar
@@ -673,6 +945,7 @@ filtros = {
     "# ACTIVO":  st.session_state.filtro_activo,
     "UBICACIÓN": st.session_state.filtro_ubicacion,
 }
+ids_operativos = _obtener_ids_operativos(df, filtros)
 clave_filtros = "|".join([
     ",".join(sorted(st.session_state.filtro_concepto)),
     ",".join(sorted(st.session_state.filtro_marca)),
@@ -687,21 +960,10 @@ columnas_mostrar = [
 
 
 if st.session_state.get("_selector_cache_clave") != clave_filtros:
-    ids_previos_cache = set(st.session_state.ids_equipos_seleccionados)
-    ids_visibles_previos = set(st.session_state.get("_selector_ids_visibles", []))
-    # Solo arrastrar seleccionados que estaban en la tabla visible previa.
-    ids_arrastrables = ids_previos_cache & ids_visibles_previos if ids_visibles_previos else ids_previos_cache
     df_filtrado = aplicar_filtros(df, filtros)
 
-    # Mantiene visibles seleccionados y los coloca al final para no romper el flujo al ampliar filtros.
-    mask_sel_filtrado = df_filtrado[COLUMNA_ID].astype(str).isin(ids_arrastrables)
-    df_filtrado_no_sel = df_filtrado[~mask_sel_filtrado]
-    df_sel = df[df[COLUMNA_ID].astype(str).isin(ids_arrastrables)]
-    df_mostrar = pd.concat([df_filtrado_no_sel, df_sel], ignore_index=True)
-    df_mostrar = df_mostrar.drop_duplicates(subset=[COLUMNA_ID], keep="first")
-
     st.session_state["_selector_cache_clave"] = clave_filtros
-    st.session_state["_selector_df_base"] = df_mostrar[columnas_mostrar].copy()
+    st.session_state["_selector_df_base"] = df_filtrado[columnas_mostrar].copy()
 
 
 def _render_selector_equipos(columnas):
@@ -723,34 +985,38 @@ def _render_selector_equipos(columnas):
         # Remonta el grid cuando cambia el filtro para evitar que AgGrid recicle
         # seleccion por indice y marque filas nuevas por error.
         filtro_hash = abs(hash(clave_filtros))
-        clave_df = f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}_{filtro_hash}"
-        ultima_key_renderizada = st.session_state.get("_selector_grid_key_rendered", "")
-        es_primer_render_de_esta_vista = ultima_key_renderizada != clave_df
         df_tabla = df_base_tabla.copy()
         df_tabla[COLUMNA_ID] = df_tabla[COLUMNA_ID].astype(str)
         ids_en_tabla = set(df_tabla[COLUMNA_ID].astype(str))
+
+        ids_preseleccionados_visibles = sorted(ids_previos & ids_en_tabla)
+        firma_seleccion = hashlib.md5(
+            "|".join(ids_preseleccionados_visibles).encode("utf-8")
+        ).hexdigest()[:10]
+        clave_df = (
+            f"selector_df_equipos_{st.session_state.get('_selector_reset_token', 0)}"
+            f"_{filtro_hash}_{firma_seleccion}"
+        )
+        ultima_key_renderizada = st.session_state.get("_selector_grid_key_rendered", "")
+        es_primer_render_de_esta_vista = ultima_key_renderizada != clave_df
 
         pre_selected_rows = [
             idx for idx, activo in enumerate(df_tabla[COLUMNA_ID].tolist())
             if activo in ids_previos
         ]
 
-        if es_primer_render_de_esta_vista:
-            ids_preseleccionados_visibles = sorted(ids_previos & ids_en_tabla)
-            js_ids = json.dumps(ids_preseleccionados_visibles)
-            sincronizar_seleccion_js = JsCode(
-                f"""
-                function(params) {{
-                    const wanted = new Set({js_ids});
-                    params.api.forEachNode(function(node) {{
-                        const rowId = String((node.data && node.data['# ACTIVO']) || '');
-                        node.setSelected(wanted.has(rowId));
-                    }});
-                }}
-                """
-            )
-        else:
-            sincronizar_seleccion_js = None
+        js_ids = json.dumps(ids_preseleccionados_visibles)
+        sincronizar_seleccion_js = JsCode(
+            f"""
+            function(params) {{
+                const wanted = new Set({js_ids});
+                params.api.forEachNode(function(node) {{
+                    const rowId = String((node.data && node.data['# ACTIVO']) || '');
+                    node.setSelected(wanted.has(rowId));
+                }});
+            }}
+            """
+        )
 
         gb = GridOptionsBuilder.from_dataframe(df_tabla)
         gb.configure_default_column(
@@ -759,6 +1025,7 @@ def _render_selector_equipos(columnas):
             resizable=True,
             editable=False,
             minWidth=120,
+            flex=1,
             cellStyle={"textAlign": "left"},
         )
         gb.configure_selection(
@@ -778,6 +1045,7 @@ def _render_selector_equipos(columnas):
             domLayout="normal",
             getRowId=JsCode("function(params) { return String(params.data['# ACTIVO'] || ''); }"),
             onFirstDataRendered=sincronizar_seleccion_js,
+            onRowDataUpdated=sincronizar_seleccion_js,
         )
         gb.configure_column(
             COLUMNA_ID,
@@ -786,19 +1054,22 @@ def _render_selector_equipos(columnas):
             headerCheckboxSelectionFilteredOnly=True,
             pinned="left",
             width=190,
+            minWidth=190,
+            flex=0,
+            suppressSizeToFit=True,
             cellStyle={"fontWeight": 600, "color": TABLA_COLORES["texto_id"], "textAlign": "left"},
         )
 
         if "CONCEPTO" in df_tabla.columns:
-            gb.configure_column("CONCEPTO", width=270)
+            gb.configure_column("CONCEPTO", minWidth=270, flex=2)
         if "MARCA" in df_tabla.columns:
-            gb.configure_column("MARCA", width=170)
+            gb.configure_column("MARCA", minWidth=170, flex=1)
         if "MODELO" in df_tabla.columns:
-            gb.configure_column("MODELO", width=145)
+            gb.configure_column("MODELO", minWidth=145, flex=1)
         if "UBICACIÓN" in df_tabla.columns:
-            gb.configure_column("UBICACIÓN", width=170)
+            gb.configure_column("UBICACIÓN", minWidth=170, flex=1)
         if "SUB UBICACIÓN" in df_tabla.columns:
-            gb.configure_column("SUB UBICACIÓN", width=175)
+            gb.configure_column("SUB UBICACIÓN", minWidth=175, flex=1)
 
         css_tabla = {
             ".ag-theme-streamlit": {
@@ -904,7 +1175,7 @@ def _render_selector_equipos(columnas):
             allow_unsafe_jscode=True,
             theme="streamlit",
             custom_css=css_tabla,
-            reload_data=False,
+            reload_data=True,
         )
 
         st.session_state["_selector_ids_visibles"] = sorted(ids_en_tabla)
@@ -938,10 +1209,25 @@ def _render_selector_equipos(columnas):
 
         # En el primer render tras cambiar filtros, AgGrid puede reportar vacio
         # antes de hidratar preseleccion; no borrar seleccion existente por eso.
+        mantener_por_autoseleccion_pendiente = (
+            bool(st.session_state.get("_selector_autoseleccion_pendiente", False))
+            and bool(ids_previos)
+            and not seleccionados_grid
+        )
+
+        respuesta_vacia_transitoria = bool(ids_previos) and not seleccionados_grid
+
         if es_primer_render_de_esta_vista and not seleccionados_grid:
+            ids_finales = ids_previos
+        elif mantener_por_autoseleccion_pendiente:
+            ids_finales = ids_previos
+        elif respuesta_vacia_transitoria:
             ids_finales = ids_previos
         else:
             ids_finales = (ids_previos - ids_en_tabla) | seleccionados_grid
+
+        if seleccionados_grid:
+            st.session_state["_selector_autoseleccion_pendiente"] = False
 
         st.session_state.ids_equipos_seleccionados = sorted(ids_finales)
 
@@ -952,6 +1238,7 @@ def _render_selector_equipos(columnas):
                 st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
                 st.session_state["_selector_limpiar_visual"] = False
                 st.session_state["_selector_sincronizar_visual"] = False
+                st.session_state["_selector_autoseleccion_pendiente"] = False
                 # Fuerza reconstruccion de la tabla con los filtros actuales,
                 # sin filas arrastradas por seleccion previa.
                 st.session_state.pop("_selector_cache_clave", None)
@@ -960,7 +1247,7 @@ def _render_selector_equipos(columnas):
                 st.rerun()
 
         with col_info:
-            total = len(st.session_state.ids_equipos_seleccionados)
+            total = len(_obtener_ids_operativos(df, filtros))
             if total:
                 st.success(f"Se seleccionaron {total} equipos")
             else:
@@ -970,11 +1257,11 @@ def _render_selector_equipos(columnas):
 with main_card:
     _render_selector_equipos(columnas_mostrar)
 
-ids_finales = set(st.session_state.ids_equipos_seleccionados)
-if not ids_finales:
+ids_operativos = _obtener_ids_operativos(df, filtros)
+if not ids_operativos:
     st.stop()
 
-equipos_a_mantener = df[df[COLUMNA_ID].astype(str).isin(ids_finales)].copy()
+equipos_a_mantener = df[df[COLUMNA_ID].astype(str).isin(ids_operativos)].copy()
 conceptos_seleccionados = equipos_a_mantener["CONCEPTO"].dropna().unique().tolist()
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -998,7 +1285,14 @@ with st.container(border=True):
             st.session_state.analizadores_propios_por_concepto[concepto] = []
 
         with st.container(border=True):
-            st.markdown(f"#### {concepto}")
+            col_quitar, col_titulo = st.columns([1, 12])
+            with col_quitar:
+                if st.button("✕", key=f"descartar_concepto_{ck}", use_container_width=True,
+                             help="Descartar este tipo de equipo de hojas y etiquetas"):
+                    _descartar_concepto_del_flujo(concepto, df)
+                    st.rerun()
+            with col_titulo:
+                st.markdown(f"#### {concepto}")
 
             # ── Fila superior: Fecha | Periodicidad | Tiempo ─────────────────
             col_fecha, col_period, col_tiempo = st.columns(3)
@@ -1175,68 +1469,120 @@ st.session_state.analizadores_seleccionados   = list(dict.fromkeys(analizadores_
 with st.container(border=True):
     st.markdown("### 4. Descargar documentación")
 
-    nombre_carpeta = st.text_input(
-        "Nombre del paquete",
-        value=f"reporte_{datetime.now():%Y%m%d_%H%M%S}",
-        help="Este será el nombre del archivo ZIP que se descargará.",
-        key="nombre_paquete_input",
-    ).strip()
-    if not nombre_carpeta:
-        nombre_carpeta = f"reporte_{datetime.now():%Y%m%d_%H%M%S}"
-    nombre_carpeta = re.sub(r"\W+", "_", nombre_carpeta).strip("_")
+    total_equipos_resumen = len(equipos_a_mantener)
+    conceptos_resumen = (
+        equipos_a_mantener["CONCEPTO"].fillna("").astype(str).value_counts().sort_index()
+        if "CONCEPTO" in equipos_a_mantener.columns else pd.Series(dtype="int64")
+    )
+    marcas_resumen = (
+        sorted(equipos_a_mantener["MARCA"].dropna().astype(str).unique().tolist())
+        if "MARCA" in equipos_a_mantener.columns else []
+    )
+    ubicaciones_resumen = (
+        sorted(equipos_a_mantener["UBICACIÓN"].dropna().astype(str).unique().tolist())
+        if "UBICACIÓN" in equipos_a_mantener.columns else []
+    )
 
-    col_boton, col_hojas, col_etiquetas = st.columns([4, 3, 3])
-    with col_boton:
-        generar = st.button("Generar paquete", type="primary", use_container_width=True)
-    with col_hojas:
-        hacer_hojas = st.checkbox("Hojas de verificación", value=True)
-    with col_etiquetas:
-        hacer_etiquetas = st.checkbox("Etiquetas", value=True)
+    st.markdown("#### Resumen final")
+    col_res_1, col_res_2, col_res_3 = st.columns(3)
+    with col_res_1:
+        st.metric("Equipos a generar", total_equipos_resumen)
+    with col_res_2:
+        st.metric("Conceptos incluidos", len(conceptos_resumen))
+    with col_res_3:
+        st.metric("Ubicaciones incluidas", len(ubicaciones_resumen))
+
+    with st.expander("Ver detalle del resumen", expanded=False):
+        if not conceptos_resumen.empty:
+            st.markdown("**Equipos por concepto**")
+            st.dataframe(
+                conceptos_resumen.rename_axis("CONCEPTO").reset_index(name="TOTAL"),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if marcas_resumen:
+            st.markdown("**Marcas incluidas**")
+            st.write(", ".join(marcas_resumen))
+        if ubicaciones_resumen:
+            st.markdown("**Ubicaciones incluidas**")
+            st.write(", ".join(ubicaciones_resumen))
+
+    with st.form("form_generar_paquete"):
+        nombre_carpeta = st.text_input(
+            "Nombre del paquete",
+            value=f"reporte_{datetime.now():%Y%m%d_%H%M%S}",
+            help="Este será el nombre del archivo ZIP que se descargará.",
+            key="nombre_paquete_input",
+        ).strip()
+        if not nombre_carpeta:
+            nombre_carpeta = f"reporte_{datetime.now():%Y%m%d_%H%M%S}"
+        nombre_carpeta = re.sub(r"\W+", "_", nombre_carpeta).strip("_")
+
+        col_boton, col_hojas, col_etiquetas = st.columns([4, 3, 3])
+        with col_boton:
+            generar = st.form_submit_button("Generar paquete", type="primary", use_container_width=True)
+        with col_hojas:
+            hacer_hojas = st.checkbox("Hojas de verificación", value=True, key="form_hacer_hojas")
+        with col_etiquetas:
+            hacer_etiquetas = st.checkbox("Etiquetas", value=True, key="form_hacer_etiquetas")
 
     if generar:
         if not hacer_hojas and not hacer_etiquetas:
             st.error("❌ Selecciona al menos una opción.")
         else:
-            progress_bar = st.progress(0)
-            status_text  = st.empty()
+            st.session_state._generar_paquete_request = {
+                "nombre_carpeta": nombre_carpeta,
+                "hacer_hojas": hacer_hojas,
+                "hacer_etiquetas": hacer_etiquetas,
+            }
+            st.session_state._generar_paquete_pendiente = True
+            st.rerun()
 
-            buffer_zip, errores, exitos = crear_paquete_reporte(
-                equipos                    = equipos_a_mantener,
-                nombre_carpeta             = nombre_carpeta,
-                ingeniero                  = config.get("nombre", ""),
-                jefe                       = config.get("jefe", ""),
-                hospital                   = config.get("hospital", ""),
-                progress_bar               = progress_bar,
-                status_text                = status_text,
-                hacer_hojas                = hacer_hojas,
-                hacer_etiquetas            = hacer_etiquetas,
-                analizadores_por_concepto  = st.session_state.get("analizadores_por_concepto", {}),
-                analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", []),
-                fecha_mantenimiento_base   = st.session_state.get("fecha_mantenimiento_por_concepto", {}),
+    if st.session_state.get("_generar_paquete_pendiente", False):
+        request = dict(st.session_state.get("_generar_paquete_request", {}))
+        progress_bar = st.progress(0)
+        status_text  = st.empty()
+
+        buffer_zip, errores, exitos = crear_paquete_reporte(
+            equipos                    = equipos_a_mantener,
+            nombre_carpeta             = request.get("nombre_carpeta", nombre_carpeta),
+            ingeniero                  = config.get("nombre", ""),
+            jefe                       = config.get("jefe", ""),
+            hospital                   = config.get("hospital", ""),
+            progress_bar               = progress_bar,
+            status_text                = status_text,
+            hacer_hojas                = bool(request.get("hacer_hojas", True)),
+            hacer_etiquetas            = bool(request.get("hacer_etiquetas", True)),
+            analizadores_por_concepto  = st.session_state.get("analizadores_por_concepto", {}),
+            analizadores_seleccionados = st.session_state.get("analizadores_seleccionados", []),
+            fecha_mantenimiento_base   = st.session_state.get("fecha_mantenimiento_por_concepto", {}),
+        )
+
+        if exitos > 0 or bool(request.get("hacer_etiquetas", True)):
+            fecha_ref, periodo_mixto = resolver_fecha_referencia_drive(
+                st.session_state.get("fecha_mantenimiento_por_concepto", {}),
+                datetime.now().date(),
             )
+            contenido_zip = buffer_zip.getvalue()
+            total_archivos_zip = _contar_archivos_en_zip(contenido_zip)
+            if total_archivos_zip > 0:
+                st.session_state.ultimo_paquete_zip_bytes     = contenido_zip
+                st.session_state.ultimo_paquete_zip_nombre    = f"{request.get('nombre_carpeta', nombre_carpeta)}.zip"
+                st.session_state.ultimo_paquete_drive_folder  = formatear_nombre_carpeta_documentacion(fecha_ref)
+                st.session_state.ultimo_paquete_periodo       = fecha_ref.isoformat()
+                st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
+                st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
+            else:
+                st.session_state.ultimo_paquete_zip_bytes = b""
+                st.error("Se generó un paquete vacío. Revisa advertencias u omisiones antes de subir a Drive.")
 
-            if exitos > 0 or hacer_etiquetas:
-                fecha_ref, periodo_mixto = resolver_fecha_referencia_drive(
-                    st.session_state.get("fecha_mantenimiento_por_concepto", {}),
-                    datetime.now().date(),
-                )
-                contenido_zip = buffer_zip.getvalue()
-                total_archivos_zip = _contar_archivos_en_zip(contenido_zip)
-                if total_archivos_zip > 0:
-                    st.session_state.ultimo_paquete_zip_bytes     = contenido_zip
-                    st.session_state.ultimo_paquete_zip_nombre    = f"{nombre_carpeta}.zip"
-                    st.session_state.ultimo_paquete_drive_folder  = formatear_nombre_carpeta_documentacion(fecha_ref)
-                    st.session_state.ultimo_paquete_periodo       = fecha_ref.isoformat()
-                    st.session_state.ultimo_paquete_periodo_mixto = periodo_mixto
-                    st.session_state.ultimo_paquete_generado_en   = datetime.now().isoformat()
-                else:
-                    st.session_state.ultimo_paquete_zip_bytes = b""
-                    st.error("Se generó un paquete vacío. Revisa advertencias u omisiones antes de subir a Drive.")
+        if errores:
+            with st.expander("Detalles de advertencias u omisiones"):
+                for err in errores:
+                    st.warning(err)
 
-            if errores:
-                with st.expander("Detalles de advertencias u omisiones"):
-                    for err in errores:
-                        st.warning(err)
+        st.session_state._generar_paquete_pendiente = False
+        st.session_state._generar_paquete_request = {}
 
     # ── Botones de descarga y Drive (aparecen cuando hay paquete generado) ──
     contenido_zip = st.session_state.get("ultimo_paquete_zip_bytes", b"")

@@ -1,12 +1,87 @@
 # pages/2_Gestion de informacion.py
+import pandas as pd
 import streamlit as st
 from utils.lector_inventario import (
     cargar_inventario,
     parsear_programacion_tinc,
     aplicar_programacion_tinc,
+    normalizar_texto,
 )
 
 st.session_state["_pagina_actual"] = "page_gestion_informacion"
+
+
+def _preseleccionar_equipos_programados(df_inventario):
+    """Aplica y guarda la selección/filtros automáticos derivados de TiNC."""
+    if df_inventario is None or "# ACTIVO" not in df_inventario.columns:
+        st.session_state.tinc_filtros_automaticos = {}
+        return 0
+
+    if "FOLIO TINC" in df_inventario.columns:
+        mask_programados = df_inventario["FOLIO TINC"].astype(str).str.strip().ne("")
+        df_programados = df_inventario.loc[mask_programados].copy()
+    else:
+        df_programados = df_inventario.iloc[0:0].copy()
+
+    activos_programados = (
+        df_programados["# ACTIVO"]
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+        if not df_programados.empty else []
+    )
+    marcas_programadas = (
+        sorted(df_programados["MARCA"].dropna().astype(str).unique().tolist())
+        if "MARCA" in df_programados.columns else []
+    )
+    ubicaciones_programadas = (
+        sorted(df_programados["UBICACIÓN"].dropna().astype(str).unique().tolist())
+        if "UBICACIÓN" in df_programados.columns else []
+    )
+    conceptos_programados = (
+        sorted(df_programados["CONCEPTO"].dropna().astype(str).unique().tolist())
+        if "CONCEPTO" in df_programados.columns else []
+    )
+
+    conceptos_display = []
+    for concepto in conceptos_programados:
+        normalizado = normalizar_texto(concepto)
+        if normalizado and normalizado not in conceptos_display:
+            conceptos_display.append(normalizado)
+
+    filtros_auto = {
+        "ids": list(activos_programados),
+        "marcas": list(marcas_programadas),
+        "ubicaciones": list(ubicaciones_programadas),
+        "conceptos": list(conceptos_programados),
+        "conceptos_display": list(conceptos_display),
+    }
+    st.session_state.tinc_filtros_automaticos = filtros_auto
+
+    st.session_state.ids_equipos_seleccionados = list(activos_programados)
+    st.session_state.filtro_activo = list(activos_programados)
+    st.session_state.filtro_marca = list(marcas_programadas)
+    st.session_state.filtro_ubicacion = list(ubicaciones_programadas)
+    st.session_state.filtro_concepto = list(conceptos_programados)
+    st.session_state.filtro_tipo_activo_display = list(conceptos_display)
+    st.session_state.ui_filtro_activo = list(activos_programados)
+    st.session_state.ui_filtro_marca = list(marcas_programadas)
+    st.session_state.ui_filtro_ubicacion = list(ubicaciones_programadas)
+    st.session_state.ui_filtro_tipo_activo_display = list(conceptos_display)
+    st.session_state.clic_buscar = bool(activos_programados)
+    st.session_state._selector_autoseleccion_pendiente = bool(activos_programados)
+
+    st.session_state.pop("_selector_cache_clave", None)
+    st.session_state.pop("_selector_df_base", None)
+    st.session_state["_selector_df_editor"] = None
+    st.session_state["_selector_grid_key_rendered"] = ""
+    st.session_state["_selector_ids_visibles"] = []
+    st.session_state["_selector_reset_token"] = st.session_state.get("_selector_reset_token", 0) + 1
+
+    return len(activos_programados)
 
 
 def _resetear_estado_inventario():
@@ -25,6 +100,8 @@ def _resetear_estado_inventario():
     st.session_state.fecha_mantenimiento_por_concepto   = {}
     st.session_state.programacion_tinc_texto            = ""
     st.session_state.programacion_tinc_df               = None
+    st.session_state.tinc_filtros_automaticos           = {}
+    st.session_state._selector_autoseleccion_pendiente  = False
     st.session_state.usar_programacion_tinc             = "No"
 
 
@@ -38,6 +115,8 @@ def _guardar_informacion_usuario():
 for key, default in {
     "programacion_tinc_texto": "",
     "programacion_tinc_df":    None,
+    "tinc_filtros_automaticos": {},
+    "_selector_autoseleccion_pendiente": False,
     "usar_programacion_tinc":  "No",
     "input_nombre_ingeniero":  st.session_state.get("nombre_ingeniero", ""),
     "input_nombre_jefe":       st.session_state.get("nombre_jefe",      ""),
@@ -170,9 +249,11 @@ with st.container(border=True):
             if st.session_state.inventario_df is not None:
                 df_prog = parsear_programacion_tinc(texto_programacion)
                 st.session_state.programacion_tinc_df  = df_prog
-                st.session_state.inventario_df = aplicar_programacion_tinc(
+                inventario_actualizado = aplicar_programacion_tinc(
                     st.session_state.inventario_df, df_prog
                 )
+                st.session_state.inventario_df = inventario_actualizado
+                _preseleccionar_equipos_programados(inventario_actualizado)
                 st.rerun()
             else:
                 st.warning("Primero sube el inventario en el paso 1.")
